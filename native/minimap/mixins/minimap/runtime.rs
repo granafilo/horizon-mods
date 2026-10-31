@@ -385,6 +385,111 @@ pub fn add_waypoint(waypoint: Waypoint) {
     });
 }
 
+/// Available palette colors for waypoints.
+pub const COLOR_PALETTE: [(&str, u32); 8] = [
+    ("Cyan", 0x0033_CCFF),
+    ("Lime", 0x0055_FF55),
+    ("Amber", 0x00FF_AA00),
+    ("Red", 0x00FF_5555),
+    ("Purple", 0x00AA_00AA),
+    ("Magenta", 0x00FF_55FF),
+    ("Yellow", 0x00FF_FF55),
+    ("White", 0x00FF_FFFF),
+];
+
+pub fn color_name(rgb: u32) -> &'static str {
+    let pure = rgb & 0x00FF_FFFF;
+    COLOR_PALETTE
+        .iter()
+        .find(|(_, c)| *c == pure)
+        .map(|(n, _)| *n)
+        .unwrap_or("Custom")
+}
+
+pub fn next_color(rgb: u32) -> u32 {
+    let pure = rgb & 0x00FF_FFFF;
+    let idx = COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+    COLOR_PALETTE[(idx + 1) % COLOR_PALETTE.len()].1
+}
+
+/// Generates the list of interactive buttons for the mod's settings page:
+/// 1. Main Minimap & HUD settings
+/// 2. Waypoint Management actions & items (Toggle visibility, cycle color, delete)
+pub fn settings_page_buttons(get: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let mut buttons = settings(&get).labels();
+    STATE.with_borrow(|s| {
+        if s.waypoints.is_empty() {
+            buttons.push("--- No Waypoints (Press B in-game) ---".to_owned());
+        } else {
+            buttons.push(format!("--- WAYPOINTS LIST ({}) ---", s.waypoints.len()));
+            for wp in &s.waypoints {
+                let status = if wp.enabled { "VISIBLE" } else { "HIDDEN" };
+                let col = color_name(wp.rgb);
+                buttons.push(format!(
+                    "[{status}] {} ({:.0}, {:.0}, {:.0}) [{col}]",
+                    wp.name, wp.x, wp.y, wp.z
+                ));
+            }
+            buttons.push("[Delete Last Waypoint]".to_owned());
+            buttons.push("[Clear All Waypoints]".to_owned());
+        }
+    });
+    buttons
+}
+
+/// Handles button clicks on the mod settings page.
+pub fn on_settings_click(button: usize, get: impl Fn(&str) -> Option<String>) {
+    let mut s = settings(&get);
+    let labels_count = s.labels().len();
+
+    if button < labels_count {
+        s.click(button);
+        set_settings(s);
+        return;
+    }
+
+    let action_idx = button - labels_count;
+    STATE.with_borrow_mut(|st| {
+        if st.waypoints.is_empty() {
+            return;
+        }
+        // action_idx 0 is header: "--- WAYPOINTS LIST ---"
+        if action_idx == 0 {
+            return;
+        }
+        let wp_idx = action_idx - 1;
+        if wp_idx < st.waypoints.len() {
+            let wp = &mut st.waypoints[wp_idx];
+            // Clicking toggles visibility, or cycles color if visible
+            if wp.enabled {
+                wp.rgb = next_color(wp.rgb);
+                // If it cycled back to Cyan, toggle off
+                if (wp.rgb & 0x00FF_FFFF) == (COLOR_PALETTE[0].1 & 0x00FF_FFFF) {
+                    wp.enabled = false;
+                }
+            } else {
+                wp.enabled = true;
+            }
+            st.waypoints_dirty = true;
+        } else {
+            let extra_action = wp_idx - st.waypoints.len();
+            if extra_action == 0 {
+                // Delete Last
+                if !st.waypoints.is_empty() {
+                    st.waypoints.pop();
+                    st.waypoints_dirty = true;
+                }
+            } else if extra_action == 1 {
+                // Clear All
+                if !st.waypoints.is_empty() {
+                    st.waypoints.clear();
+                    st.waypoints_dirty = true;
+                }
+            }
+        }
+    });
+}
+
 /// Periodic tick: decrement remaining ticks and remove expired pings.
 pub fn tick() {
     STATE.with_borrow_mut(|s| {
@@ -961,5 +1066,43 @@ mod tests {
         let proj_behind =
             project_in_world_hud(target_behind, player_eye, 0.0, 0.0, 800.0, 600.0, 70.0);
         assert!(proj_behind.is_none());
+    }
+
+    #[test]
+    fn test_settings_page_buttons_and_click() {
+        STATE.with_borrow_mut(|s| {
+            s.waypoints = vec![Waypoint {
+                name: "Base".to_string(),
+                x: 10.0,
+                y: 64.0,
+                z: 20.0,
+                dimension: "minecraft:overworld".to_string(),
+                rgb: 0x0033_CCFF, // Cyan
+                enabled: true,
+            }];
+        });
+
+        let dummy_get = |_k: &str| None;
+        let buttons = settings_page_buttons(dummy_get);
+        assert!(buttons.iter().any(|b| b.contains("WAYPOINTS LIST (1)")));
+        assert!(buttons.iter().any(|b| b.contains("[VISIBLE] Base (10, 64, 20) [Cyan]")));
+
+        let base_labels_len = settings(dummy_get).labels().len();
+        // Index for first waypoint button: base_labels_len + 1 (0 is header)
+        let wp_btn_idx = base_labels_len + 1;
+        
+        // Clicking should cycle color to Lime
+        on_settings_click(wp_btn_idx, dummy_get);
+        STATE.with_borrow(|s| {
+            assert_eq!(color_name(s.waypoints[0].rgb), "Lime");
+            assert!(s.waypoints[0].enabled);
+        });
+
+        // Test delete last button
+        let delete_last_idx = base_labels_len + 2;
+        on_settings_click(delete_last_idx, dummy_get);
+        STATE.with_borrow(|s| {
+            assert!(s.waypoints.is_empty());
+        });
     }
 }
