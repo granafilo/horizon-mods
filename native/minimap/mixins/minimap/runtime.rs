@@ -137,6 +137,7 @@ pub struct Settings {
     pub show_hud_pings: bool,
     pub show_minimap_pings: bool,
     pub show_coords: bool,
+    pub show_beacons: bool,
 }
 
 impl Settings {
@@ -160,6 +161,7 @@ impl Settings {
             show_hud_pings: get("hud_pings").as_deref() != Some("false"),
             show_minimap_pings: get("minimap_pings").as_deref() != Some("false"),
             show_coords: get("show_coords").as_deref() != Some("false"),
+            show_beacons: get("show_beacons").as_deref() != Some("false"),
         }
     }
 
@@ -193,6 +195,10 @@ impl Settings {
                 "Coordinates & Facing: {}",
                 if self.show_coords { "ON" } else { "OFF" }
             ),
+            format!(
+                "Waypoint Beacons: {}",
+                if self.show_beacons { "ON" } else { "OFF" }
+            ),
         ]
     }
 
@@ -207,11 +213,12 @@ impl Settings {
             5 => self.show_hud_pings = !self.show_hud_pings,
             6 => self.show_minimap_pings = !self.show_minimap_pings,
             7 => self.show_coords = !self.show_coords,
+            8 => self.show_beacons = !self.show_beacons,
             _ => {}
         }
     }
 
-    pub fn stored(&self) -> [(&'static str, String); 8] {
+    pub fn stored(&self) -> [(&'static str, String); 9] {
         [
             ("corner", CORNERS[self.corner].0.to_owned()),
             ("size", SIZES[self.size].0.to_string()),
@@ -235,6 +242,10 @@ impl Settings {
             (
                 "show_coords",
                 if self.show_coords { "true" } else { "false" }.to_owned(),
+            ),
+            (
+                "show_beacons",
+                if self.show_beacons { "true" } else { "false" }.to_owned(),
             ),
         ]
     }
@@ -651,11 +662,60 @@ pub fn draw_hud(
                 });
             }
 
-            // In-World HUD marker
+            // In-World HUD marker & Beacon Beam
             if settings.show_hud_pings {
+                let p_eye = [player.eye_x, player.eye_y, player.eye_z];
+
+                // Vertical Beacon Beam
+                if settings.show_beacons {
+                    let beam_bottom_y = wp.y;
+                    let beam_top_y = (wp.y + 250.0).min(320.0);
+                    let proj_bot = project_in_world_hud(
+                        [wp.x, beam_bottom_y, wp.z],
+                        p_eye,
+                        player.yaw,
+                        player.pitch,
+                        screen_width,
+                        screen_height,
+                        player.fov,
+                    );
+                    let proj_top = project_in_world_hud(
+                        [wp.x, beam_top_y, wp.z],
+                        p_eye,
+                        player.yaw,
+                        player.pitch,
+                        screen_width,
+                        screen_height,
+                        player.fov,
+                    );
+
+                    if let (Some([bx_bot, by_bot]), Some([_bx_top, by_top])) = (proj_bot, proj_top) {
+                        let y_min = by_top.min(by_bot).max(0.0);
+                        let y_max = by_top.max(by_bot).min(screen_height);
+                        let beam_h = y_max - y_min;
+                        if beam_h > 1.0 {
+                            // Beam width scales slightly with proximity (1px to 4px)
+                            let beam_w = (40.0 / (dist as f32).max(10.0)).clamp(2.0, 5.0);
+                            let beam_alpha = 0x5500_0000; // Semi-transparent glow
+                            let beam_argb = beam_alpha | (wp.rgb & 0x00FF_FFFF);
+                            ops.push(HudDrawOp::Fill {
+                                rect: [bx_bot - beam_w * 0.5, y_min, beam_w, beam_h],
+                                argb: beam_argb,
+                            });
+                            // Central bright core
+                            let core_w = (beam_w * 0.5).max(1.0);
+                            let core_argb = 0xAA00_0000 | (wp.rgb & 0x00FF_FFFF);
+                            ops.push(HudDrawOp::Fill {
+                                rect: [bx_bot - core_w * 0.5, y_min, core_w, beam_h],
+                                argb: core_argb,
+                            });
+                        }
+                    }
+                }
+
                 if let Some([sx, sy]) = project_in_world_hud(
                     [wp.x, wp.y, wp.z],
-                    [player.eye_x, player.eye_y, player.eye_z],
+                    p_eye,
                     player.yaw,
                     player.pitch,
                     screen_width,
@@ -761,8 +821,8 @@ mod tests {
         let none = |_: &str| None;
         let s = Settings::read(none);
         assert_eq!(
-            (s.corner, s.size, s.round, s.zoom, s.rotate, s.show_hud_pings, s.show_minimap_pings, s.show_coords),
-            (1, 1, false, 1, false, true, true, true)
+            (s.corner, s.size, s.round, s.zoom, s.rotate, s.show_hud_pings, s.show_minimap_pings, s.show_coords, s.show_beacons),
+            (1, 1, false, 1, false, true, true, true, true)
         );
 
         let files = [
@@ -774,6 +834,7 @@ mod tests {
             ("hud_pings", "false"),
             ("minimap_pings", "true"),
             ("show_coords", "true"),
+            ("show_beacons", "true"),
         ];
         let get = |k: &str| files.iter().find(|f| f.0 == k).map(|f| f.1.to_owned());
         let mut s = Settings::read(get);
@@ -781,14 +842,18 @@ mod tests {
         assert!(!s.show_hud_pings);
         assert!(s.show_minimap_pings);
         assert!(s.show_coords);
+        assert!(s.show_beacons);
 
         s.click(5); // toggle hud_pings
         assert!(s.show_hud_pings);
         s.click(7); // toggle show_coords
         assert!(!s.show_coords);
+        s.click(8); // toggle show_beacons
+        assert!(!s.show_beacons);
         let stored = s.stored();
         assert_eq!(stored[5], ("hud_pings", "true".to_owned()));
         assert_eq!(stored[7], ("show_coords", "false".to_owned()));
+        assert_eq!(stored[8], ("show_beacons", "false".to_owned()));
     }
 
     #[test]
