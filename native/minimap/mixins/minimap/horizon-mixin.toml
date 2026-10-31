@@ -121,4 +121,25 @@ bindings = [
   { name = "pressed", ty = "bool", value = "pressed" },
 ]
 
+[[injection]]
+id = "minimap_shown"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::extras::Game<'_>::minimap_shown"
+helper = "minimap_shown.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+]
+
+[[injection]]
+id = "wheel"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_wheel"
+helper = "wheel.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "steps", ty = "f32", value = "steps" },
+  { name = "claimed", ty = "&mut bool", value = "&mut *claimed" },
+]
+
 

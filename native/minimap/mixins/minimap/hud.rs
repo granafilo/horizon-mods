@@ -13,7 +13,7 @@ fn minimap_hud(
         return;
     };
 
-    if m::is_gui_open() {
+    if m::is_gui_open() || m::is_world_map_open() {
         batch.vertices.clear();
         batch.blends.clear();
         batch.patches.clear();
@@ -25,6 +25,10 @@ fn minimap_hud(
         if let Some((y, p)) = m::get_frozen_look() {
             game.yaw = y;
             game.pitch = p;
+        }
+
+        if m::is_world_map_open() {
+            m::update_world_map_drag(game.cursor);
         }
     }
 
@@ -119,6 +123,26 @@ fn minimap_hud(
                     batch.width,
                     color,
                 );
+            }
+            m::HudDrawOp::MapTexture { rect } => {
+                if let Some(sprite) = game.gui.atlas.sprites.get(horizon_client::hud::MINIMAP_SPRITE).copied() {
+                    batch.rect_uv(rect[0], rect[1], rect[2], rect[3], sprite, u32::MAX);
+                }
+            }
+            m::HudDrawOp::PlayerMarker { center, yaw } => {
+                let (cx, cy) = (center[0], center[1]);
+                if let Some(r) = game.gui.atlas.sprites.get("map/decorations/player").copied() {
+                    let (s, c) = (yaw + 180.0).to_radians().sin_cos();
+                    let p = |dx: f32, dy: f32| [cx + dx * c - dy * s, cy + dx * s + dy * c];
+                    let h = 5.0;
+                    batch.quad(
+                        [p(-h, h), p(h, h), p(h, -h), p(-h, -h)],
+                        [[r.u0, r.v0], [r.u1, r.v0], [r.u1, r.v1], [r.u0, r.v1]],
+                        u32::MAX,
+                    );
+                } else {
+                    game.native_fill(batch, [cx - 3.0, cy - 3.0, 6.0, 6.0], 0xFFFF_3333);
+                }
             }
         }
     }

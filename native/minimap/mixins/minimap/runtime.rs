@@ -15,6 +15,9 @@ pub const KEY_WAYPOINT: &str = "waypoint";
 pub const DEFAULT_WAYPOINT_KEY: &str = "key.keyboard.b";
 pub const KEY_WAYPOINTS_GUI: &str = "waypoints_gui";
 pub const DEFAULT_WAYPOINTS_GUI_KEY: &str = "key.keyboard.u";
+pub const KEY_WORLD_MAP: &str = "world_map";
+pub const DEFAULT_WORLD_MAP_KEY: &str = "key.keyboard.m";
+pub const WORLD_MAP_ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
 
 /// Quick ping lifetime in ticks (20 ticks = 1 sec -> 200 ticks = 10 sec).
 pub const PING_LIFETIME_TICKS: u32 = 200;
@@ -334,6 +337,59 @@ pub struct WaypointsGuiState {
     pub last_frozen_look: Option<(f32, f32)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorldMapState {
+    pub is_open: bool,
+    pub pan_x: f64,
+    pub pan_z: f64,
+    pub zoom_index: usize,
+    pub dragging: bool,
+    pub drag_start_cursor: (f32, f32),
+    pub drag_start_pan: (f64, f64),
+    pub screen_width: f32,
+    pub screen_height: f32,
+    pub was_creative: bool,
+    pub frozen_look: Option<(f32, f32)>,
+    pub suppress_mouse_frames: u8,
+    pub last_frozen_look: Option<(f32, f32)>,
+    pub message: Option<(String, u32)>,
+}
+
+impl Default for WorldMapState {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            pan_x: 0.0,
+            pan_z: 0.0,
+            zoom_index: 1, // Default 1.0 bpp
+            dragging: false,
+            drag_start_cursor: (0.0, 0.0),
+            drag_start_pan: (0.0, 0.0),
+            screen_width: 0.0,
+            screen_height: 0.0,
+            was_creative: false,
+            frozen_look: None,
+            suppress_mouse_frames: 0,
+            last_frozen_look: None,
+            message: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WorldMapClickAction {
+    None,
+    Close,
+    OpenWaypointsGui,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WorldMapKeyAction {
+    None,
+    Close,
+    OpenWaypointsGui,
+}
+
 #[derive(Default)]
 pub struct RuntimeState {
     pub settings: Option<Settings>,
@@ -342,6 +398,7 @@ pub struct RuntimeState {
     pub waypoints_loaded: bool,
     pub waypoints_dirty: bool,
     pub gui: WaypointsGuiState,
+    pub world_map: WorldMapState,
 }
 
 thread_local! {
@@ -536,11 +593,17 @@ pub fn close_gui() {
 }
 
 pub fn was_creative() -> bool {
-    STATE.with_borrow(|s| s.gui.was_creative)
+    STATE.with_borrow(|s| s.gui.was_creative || s.world_map.was_creative)
 }
 
 pub fn get_frozen_look() -> Option<(f32, f32)> {
-    STATE.with_borrow(|s| s.gui.frozen_look.or(s.gui.last_frozen_look))
+    STATE.with_borrow(|s| {
+        s.gui
+            .frozen_look
+            .or(s.gui.last_frozen_look)
+            .or(s.world_map.frozen_look)
+            .or(s.world_map.last_frozen_look)
+    })
 }
 
 pub fn take_suppress_mouse_look() -> Option<(f32, f32)> {
@@ -548,10 +611,345 @@ pub fn take_suppress_mouse_look() -> Option<(f32, f32)> {
         if s.gui.suppress_mouse_frames > 0 {
             s.gui.suppress_mouse_frames -= 1;
             s.gui.last_frozen_look
+        } else if s.world_map.suppress_mouse_frames > 0 {
+            s.world_map.suppress_mouse_frames -= 1;
+            s.world_map.last_frozen_look
         } else {
             None
         }
     })
+}
+
+fn do_close_world_map(wm: &mut WorldMapState) {
+    wm.is_open = false;
+    wm.dragging = false;
+    if let Some(look) = wm.frozen_look.take() {
+        wm.last_frozen_look = Some(look);
+        wm.suppress_mouse_frames = 3;
+    }
+}
+
+pub fn is_world_map_open() -> bool {
+    STATE.with_borrow(|s| s.world_map.is_open)
+}
+
+pub fn get_world_map_view() -> Option<(f64, f64, f32)> {
+    STATE.with_borrow(|s| {
+        if s.world_map.is_open {
+            let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+            Some((s.world_map.pan_x, s.world_map.pan_z, bpp))
+        } else {
+            None
+        }
+    })
+}
+
+pub fn close_world_map() {
+    STATE.with_borrow_mut(|s| {
+        do_close_world_map(&mut s.world_map);
+    });
+}
+
+pub fn toggle_world_map(
+    player: Option<PlayerSnapshot>,
+    was_creative: bool,
+    yaw: f32,
+    pitch: f32,
+) -> bool {
+    STATE.with_borrow_mut(|s| {
+        if s.world_map.is_open {
+            do_close_world_map(&mut s.world_map);
+        } else {
+            if s.gui.is_open {
+                do_close_gui(&mut s.gui);
+            }
+            s.world_map.is_open = true;
+            s.world_map.was_creative = was_creative;
+            s.world_map.frozen_look = Some((yaw, pitch));
+            s.world_map.last_frozen_look = Some((yaw, pitch));
+            s.world_map.suppress_mouse_frames = 0;
+            s.world_map.dragging = false;
+            if let Some(p) = player {
+                s.world_map.pan_x = p.x;
+                s.world_map.pan_z = p.z;
+            }
+        }
+        s.world_map.is_open
+    })
+}
+
+pub fn world_map_zoom_in() {
+    STATE.with_borrow_mut(|s| {
+        if s.world_map.zoom_index > 0 {
+            s.world_map.zoom_index -= 1;
+        }
+    });
+}
+
+pub fn world_map_zoom_out() {
+    STATE.with_borrow_mut(|s| {
+        if s.world_map.zoom_index + 1 < WORLD_MAP_ZOOMS.len() {
+            s.world_map.zoom_index += 1;
+        }
+    });
+}
+
+pub fn world_map_pan(dx: f64, dz: f64) {
+    STATE.with_borrow_mut(|s| {
+        s.world_map.pan_x += dx;
+        s.world_map.pan_z += dz;
+    });
+}
+
+pub fn world_map_center(player: Option<PlayerSnapshot>) {
+    if let Some(p) = player {
+        STATE.with_borrow_mut(|s| {
+            s.world_map.pan_x = p.x;
+            s.world_map.pan_z = p.z;
+            s.world_map.message = Some(("Centered on Player".to_string(), 40));
+        });
+    }
+}
+
+pub fn start_world_map_drag(cursor: (f32, f32)) {
+    STATE.with_borrow_mut(|s| {
+        s.world_map.dragging = true;
+        s.world_map.drag_start_cursor = cursor;
+        s.world_map.drag_start_pan = (s.world_map.pan_x, s.world_map.pan_z);
+    });
+}
+
+pub fn update_world_map_drag(cursor: (f32, f32)) {
+    STATE.with_borrow_mut(|s| {
+        if !s.world_map.dragging {
+            return;
+        }
+        let sw = if s.world_map.screen_width > 0.0 { s.world_map.screen_width } else { 427.0 };
+        let sh = if s.world_map.screen_height > 0.0 { s.world_map.screen_height } else { 240.0 };
+        let map_size = (sw - 24.0).min(sh - 62.0).min(512.0);
+        let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+        let scale = map_size / 128.0;
+
+        let dx_screen = cursor.0 - s.world_map.drag_start_cursor.0;
+        let dy_screen = cursor.1 - s.world_map.drag_start_cursor.1;
+        let world_dx = -(f64::from(dx_screen / scale * bpp));
+        let world_dz = -(f64::from(dy_screen / scale * bpp));
+
+        s.world_map.pan_x = s.world_map.drag_start_pan.0 + world_dx;
+        s.world_map.pan_z = s.world_map.drag_start_pan.1 + world_dz;
+    });
+}
+
+pub fn end_world_map_drag() {
+    STATE.with_borrow_mut(|s| {
+        s.world_map.dragging = false;
+    });
+}
+
+pub fn on_world_map_click(
+    cursor_x: f32,
+    cursor_y: f32,
+    player: Option<PlayerSnapshot>,
+) -> WorldMapClickAction {
+    let cursor = (cursor_x, cursor_y);
+    let mut action = WorldMapClickAction::None;
+
+    STATE.with_borrow_mut(|s| {
+        if !s.world_map.is_open {
+            return;
+        }
+        let sw = if s.world_map.screen_width > 0.0 { s.world_map.screen_width } else { 427.0 };
+        let sh = if s.world_map.screen_height > 0.0 { s.world_map.screen_height } else { 240.0 };
+        let map_size = (sw - 24.0).min(sh - 62.0).min(512.0);
+        let map_x = ((sw - map_size) / 2.0).round();
+        let map_y = (30.0 + (sh - 62.0 - map_size) / 2.0).round();
+        let map_rect = [map_x, map_y, map_size, map_size];
+
+        let btn_y = sh - 26.0;
+
+        // Button 1: Zoom [-]
+        let btn_zoom_out = [map_x, btn_y, 48.0, 20.0];
+        if is_inside(cursor, btn_zoom_out) {
+            if s.world_map.zoom_index + 1 < WORLD_MAP_ZOOMS.len() {
+                s.world_map.zoom_index += 1;
+            }
+            return;
+        }
+
+        // Button 2: Zoom [+]
+        let btn_zoom_in = [map_x + 52.0, btn_y, 48.0, 20.0];
+        if is_inside(cursor, btn_zoom_in) {
+            if s.world_map.zoom_index > 0 {
+                s.world_map.zoom_index -= 1;
+            }
+            return;
+        }
+
+        // Button 3: Center
+        let btn_center = [map_x + 104.0, btn_y, 60.0, 20.0];
+        if is_inside(cursor, btn_center) {
+            if let Some(p) = player {
+                s.world_map.pan_x = p.x;
+                s.world_map.pan_z = p.z;
+                s.world_map.message = Some(("Centered on Player".to_string(), 40));
+            }
+            return;
+        }
+
+        // Button 4: Waypoints
+        let btn_waypoints = [map_x + map_size - 144.0, btn_y, 76.0, 20.0];
+        if is_inside(cursor, btn_waypoints) {
+            do_close_world_map(&mut s.world_map);
+            action = WorldMapClickAction::OpenWaypointsGui;
+            return;
+        }
+
+        // Button 5: Close
+        let btn_close = [map_x + map_size - 64.0, btn_y, 64.0, 20.0];
+        if is_inside(cursor, btn_close) {
+            do_close_world_map(&mut s.world_map);
+            action = WorldMapClickAction::Close;
+            return;
+        }
+
+        // Click on map viewport -> start dragging!
+        if is_inside(cursor, map_rect) {
+            s.world_map.dragging = true;
+            s.world_map.drag_start_cursor = cursor;
+            s.world_map.drag_start_pan = (s.world_map.pan_x, s.world_map.pan_z);
+        }
+    });
+
+    action
+}
+
+pub fn on_world_map_right_click(
+    cursor_x: f32,
+    cursor_y: f32,
+    player: Option<PlayerSnapshot>,
+) -> bool {
+    let cursor = (cursor_x, cursor_y);
+    let mut created = false;
+
+    STATE.with_borrow_mut(|s| {
+        if !s.world_map.is_open {
+            return;
+        }
+        let sw = if s.world_map.screen_width > 0.0 { s.world_map.screen_width } else { 427.0 };
+        let sh = if s.world_map.screen_height > 0.0 { s.world_map.screen_height } else { 240.0 };
+        let map_size = (sw - 24.0).min(sh - 62.0).min(512.0);
+        let map_x = ((sw - map_size) / 2.0).round();
+        let map_y = (30.0 + (sh - 62.0 - map_size) / 2.0).round();
+        let map_rect = [map_x, map_y, map_size, map_size];
+
+        if !is_inside(cursor, map_rect) {
+            return;
+        }
+
+        let map_cx = map_x + map_size / 2.0;
+        let map_cy = map_y + map_size / 2.0;
+        let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+        let scale = map_size / 128.0;
+
+        let norm_x = (cursor.0 - map_cx) / scale;
+        let norm_z = (cursor.1 - map_cy) / scale;
+        let world_x = (s.world_map.pan_x + f64::from(norm_x * bpp)).round();
+        let world_z = (s.world_map.pan_z + f64::from(norm_z * bpp)).round();
+        let (world_y, dimension) = match player {
+            Some(p) => (p.y, p.dimension),
+            None => (64.0, "minecraft:overworld".to_string()),
+        };
+
+        let new_idx = s.waypoints.len() + 1;
+        let wp = Waypoint {
+            name: format!("Waypoint #{}", new_idx),
+            x: world_x,
+            y: world_y,
+            z: world_z,
+            dimension,
+            rgb: COLOR_PALETTE[0].1, // Cyan default
+            enabled: true,
+        };
+        s.waypoints.push(wp);
+        s.waypoints_dirty = true;
+        s.world_map.message = Some((
+            format!("Created Waypoint #{} at {}, {}", new_idx, world_x as i32, world_z as i32),
+            60,
+        ));
+        created = true;
+    });
+
+    created
+}
+
+pub fn on_world_map_key(
+    key: &str,
+    pressed: bool,
+    world_map_key: &str,
+    waypoints_key: &str,
+    player: Option<PlayerSnapshot>,
+) -> WorldMapKeyAction {
+    if !pressed {
+        return WorldMapKeyAction::None;
+    }
+
+    let mut action = WorldMapKeyAction::None;
+
+    STATE.with_borrow_mut(|s| {
+        if !s.world_map.is_open {
+            return;
+        }
+
+        if key == "key.keyboard.escape" || key == world_map_key {
+            do_close_world_map(&mut s.world_map);
+            action = WorldMapKeyAction::Close;
+            return;
+        }
+
+        if key == waypoints_key {
+            do_close_world_map(&mut s.world_map);
+            action = WorldMapKeyAction::OpenWaypointsGui;
+            return;
+        }
+
+        let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+        let pan_step = (32.0 * bpp) as f64;
+
+        match key {
+            "key.keyboard.w" | "key.keyboard.up" => {
+                s.world_map.pan_z -= pan_step;
+            }
+            "key.keyboard.s" | "key.keyboard.down" => {
+                s.world_map.pan_z += pan_step;
+            }
+            "key.keyboard.a" | "key.keyboard.left" => {
+                s.world_map.pan_x -= pan_step;
+            }
+            "key.keyboard.d" | "key.keyboard.right" => {
+                s.world_map.pan_x += pan_step;
+            }
+            "key.keyboard.equal" | "key.keyboard.plus" => {
+                if s.world_map.zoom_index > 0 {
+                    s.world_map.zoom_index -= 1;
+                }
+            }
+            "key.keyboard.minus" => {
+                if s.world_map.zoom_index + 1 < WORLD_MAP_ZOOMS.len() {
+                    s.world_map.zoom_index += 1;
+                }
+            }
+            "key.keyboard.space" | "key.keyboard.c" => {
+                if let Some(p) = player {
+                    s.world_map.pan_x = p.x;
+                    s.world_map.pan_z = p.z;
+                    s.world_map.message = Some(("Centered on Player".to_string(), 40));
+                }
+            }
+            _ => {}
+        }
+    });
+
+    action
 }
 
 pub fn toggle_gui(
@@ -1471,6 +1869,256 @@ pub enum HudDrawOp {
     Separators { top: f32, bottom: f32 },
     Button { rect: [f32; 4], label: String, active: bool, hover: bool },
     CenteredText { text: String, y: f32, color: u32 },
+    MapTexture { rect: [f32; 4] },
+    PlayerMarker { center: [f32; 2], yaw: f32 },
+}
+
+pub fn draw_world_map(
+    screen_width: f32,
+    screen_height: f32,
+    cursor: (f32, f32),
+    player: &PlayerSnapshot,
+    ops: &mut Vec<HudDrawOp>,
+) {
+    STATE.with_borrow_mut(|s| {
+        if !s.world_map.is_open {
+            return;
+        }
+
+        s.world_map.screen_width = screen_width;
+        s.world_map.screen_height = screen_height;
+
+        if let Some((_, ref mut ticks)) = s.world_map.message {
+            if *ticks > 0 {
+                *ticks -= 1;
+            } else {
+                s.world_map.message = None;
+            }
+        }
+
+        // 1. Fullscreen Menu Background
+        ops.push(HudDrawOp::MenuBackground {
+            rect: [0.0, 0.0, screen_width, screen_height],
+        });
+
+        // 2. Top Header Bar
+        ops.push(HudDrawOp::Fill {
+            rect: [0.0, 0.0, screen_width, 28.0],
+            argb: 0xDD00_0000,
+        });
+
+        ops.push(HudDrawOp::Text {
+            text: "World Map".to_string(),
+            at: [12.0, 9.0],
+            rgb: 0x00FF_FFAA,
+            shadow: true,
+        });
+
+        let map_size = (screen_width - 24.0).min(screen_height - 62.0).min(512.0);
+        let map_x = ((screen_width - map_size) / 2.0).round();
+        let map_y = (30.0 + (screen_height - 62.0 - map_size) / 2.0).round();
+        let map_rect = [map_x, map_y, map_size, map_size];
+        let map_cx = map_x + map_size / 2.0;
+        let map_cy = map_y + map_size / 2.0;
+        let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+        let scale = map_size / 128.0;
+
+        // Cursor coordinates in world blocks (if hovering map)
+        if is_inside(cursor, map_rect) {
+            let norm_x = (cursor.0 - map_cx) / scale;
+            let norm_z = (cursor.1 - map_cy) / scale;
+            let cur_wx = (s.world_map.pan_x + f64::from(norm_x * bpp)).round() as i32;
+            let cur_wz = (s.world_map.pan_z + f64::from(norm_z * bpp)).round() as i32;
+            ops.push(HudDrawOp::Text {
+                text: format!("Cursor: [{}, {}]", cur_wx, cur_wz),
+                at: [80.0, 9.0],
+                rgb: 0x00AA_FFFF,
+                shadow: true,
+            });
+        }
+
+        // Player Coordinates on right of header
+        let p_info = format!(
+            "Player: [{}, {}, {}] ({})",
+            player.x.floor() as i32,
+            player.y.floor() as i32,
+            player.z.floor() as i32,
+            cardinal_facing(player.yaw)
+        );
+        ops.push(HudDrawOp::Text {
+            text: p_info,
+            at: [screen_width - 200.0, 9.0],
+            rgb: 0x00DD_DDDD,
+            shadow: true,
+        });
+
+        // 3. Map Viewport Border
+        ops.push(HudDrawOp::Fill {
+            rect: [map_x - 2.0, map_y - 2.0, map_size + 4.0, map_size + 4.0],
+            argb: 0xFF2A_2A2A,
+        });
+
+        // 4. Map Texture
+        ops.push(HudDrawOp::MapTexture { rect: map_rect });
+
+        // 5. Center Crosshair
+        ops.push(HudDrawOp::Fill {
+            rect: [map_cx - 4.0, map_cy, 9.0, 1.0],
+            argb: 0x80FF_FFFF,
+        });
+        ops.push(HudDrawOp::Fill {
+            rect: [map_cx, map_cy - 4.0, 1.0, 9.0],
+            argb: 0x80FF_FFFF,
+        });
+
+        // 6. Waypoints
+        let mut hovered_wp: Option<(String, [f32; 2], u32)> = None;
+        for wp in &s.waypoints {
+            if wp.dimension != player.dimension || !wp.enabled {
+                continue;
+            }
+            let dx = wp.x - s.world_map.pan_x;
+            let dz = wp.z - s.world_map.pan_z;
+            let wx_screen = map_cx + (dx as f32 / bpp) * scale;
+            let wz_screen = map_cy + (dz as f32 / bpp) * scale;
+
+            if is_inside((wx_screen, wz_screen), map_rect) {
+                // Waypoint marker square with border
+                ops.push(HudDrawOp::Fill {
+                    rect: [wx_screen - 3.0, wz_screen - 3.0, 7.0, 7.0],
+                    argb: 0xFF00_0000,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [wx_screen - 2.0, wz_screen - 2.0, 5.0, 5.0],
+                    argb: 0xFF00_0000 | (wp.rgb & 0x00FF_FFFF),
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [wx_screen, wz_screen, 1.0, 1.0],
+                    argb: 0xFFFF_FFFF,
+                });
+
+                // Check hover
+                if (cursor.0 - wx_screen).abs() <= 6.0 && (cursor.1 - wz_screen).abs() <= 6.0 {
+                    let dist = wp.distance_to(player.x, player.y, player.z).round() as i32;
+                    let label = format!("{} ({}m) [{}, {}, {}]", wp.name, dist, wp.x as i32, wp.y as i32, wp.z as i32);
+                    hovered_wp = Some((label, [cursor.0, cursor.1 - 18.0], wp.rgb));
+                }
+            }
+        }
+
+        // 7. Player Marker
+        let p_dx = player.x - s.world_map.pan_x;
+        let p_dz = player.z - s.world_map.pan_z;
+        let p_sx = map_cx + (p_dx as f32 / bpp) * scale;
+        let p_sy = map_cy + (p_dz as f32 / bpp) * scale;
+
+        if is_inside((p_sx, p_sy), map_rect) {
+            ops.push(HudDrawOp::PlayerMarker {
+                center: [p_sx, p_sy],
+                yaw: player.yaw,
+            });
+        } else {
+            // Player is outside view: draw clamped edge indicator
+            let clamped_x = p_sx.clamp(map_x + 6.0, map_x + map_size - 6.0);
+            let clamped_y = p_sy.clamp(map_y + 6.0, map_y + map_size - 6.0);
+            ops.push(HudDrawOp::Fill {
+                rect: [clamped_x - 3.0, clamped_y - 3.0, 7.0, 7.0],
+                argb: 0xFFFF_FFFF,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [clamped_x - 2.0, clamped_y - 2.0, 5.0, 5.0],
+                argb: 0xFFFF_3333,
+            });
+        }
+
+        // 8. Hovered Waypoint Tooltip
+        if let Some((text, at, col)) = hovered_wp {
+            let tw = (text.len() as f32) * 6.0 + 8.0;
+            let tx = at[0].clamp(map_x + 4.0, map_x + map_size - tw - 4.0);
+            ops.push(HudDrawOp::Fill {
+                rect: [tx, at[1], tw, 14.0],
+                argb: 0xEE11_1111,
+            });
+            ops.push(HudDrawOp::Text {
+                text,
+                at: [tx + 4.0, at[1] + 3.0],
+                rgb: col,
+                shadow: true,
+            });
+        }
+
+        // 9. Bottom Control Bar
+        ops.push(HudDrawOp::Fill {
+            rect: [0.0, screen_height - 30.0, screen_width, 30.0],
+            argb: 0xDD00_0000,
+        });
+
+        let btn_y = screen_height - 26.0;
+
+        // Button 1: Zoom [-]
+        let btn_zoom_out = [map_x, btn_y, 48.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn_zoom_out,
+            label: "Zoom -".to_string(),
+            active: s.world_map.zoom_index + 1 < WORLD_MAP_ZOOMS.len(),
+            hover: is_inside(cursor, btn_zoom_out),
+        });
+
+        // Button 2: Zoom [+]
+        let btn_zoom_in = [map_x + 52.0, btn_y, 48.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn_zoom_in,
+            label: "Zoom +".to_string(),
+            active: s.world_map.zoom_index > 0,
+            hover: is_inside(cursor, btn_zoom_in),
+        });
+
+        // Zoom info label
+        let zoom_str = format!("Zoom: {:.1}x", 1.0 / bpp);
+        ops.push(HudDrawOp::Text {
+            text: zoom_str,
+            at: [map_x + 106.0, btn_y + 6.0],
+            rgb: 0x00FF_FFAA,
+            shadow: true,
+        });
+
+        // Button 3: Center
+        let btn_center = [map_x + 168.0, btn_y, 56.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn_center,
+            label: "Center".to_string(),
+            active: true,
+            hover: is_inside(cursor, btn_center),
+        });
+
+        // Notification message if active
+        if let Some((ref msg, _)) = s.world_map.message {
+            ops.push(HudDrawOp::Text {
+                text: msg.clone(),
+                at: [map_x + 230.0, btn_y + 6.0],
+                rgb: 0x0055_FF55,
+                shadow: true,
+            });
+        }
+
+        // Button 4: Waypoints
+        let btn_waypoints = [map_x + map_size - 144.0, btn_y, 76.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn_waypoints,
+            label: "Waypoints".to_string(),
+            active: true,
+            hover: is_inside(cursor, btn_waypoints),
+        });
+
+        // Button 5: Close
+        let btn_close = [map_x + map_size - 64.0, btn_y, 64.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn_close,
+            label: "Close".to_string(),
+            active: true,
+            hover: is_inside(cursor, btn_close),
+        });
+    });
 }
 
 /// Draw HUD and Minimap markers.
@@ -1484,6 +2132,12 @@ pub fn draw_hud(
     text_width: impl Fn(&str) -> f32,
 ) -> Vec<HudDrawOp> {
     let mut ops = Vec::new();
+
+    if is_world_map_open() {
+        draw_world_map(screen_width, screen_height, cursor, player, &mut ops);
+        return ops;
+    }
+
     let (map_size, blocks_per_pixel) = settings.view();
     let (map_x, map_y) = minimap_rect(settings.corner, map_size, screen_width, screen_height);
     let map_center = [map_x + map_size / 2.0, map_y + map_size / 2.0];
@@ -2023,5 +2677,90 @@ mod tests {
         assert_eq!(take_suppress_mouse_look(), Some((45.0, -15.0)));
         assert_eq!(take_suppress_mouse_look(), Some((45.0, -15.0)));
         assert_eq!(take_suppress_mouse_look(), None);
+    }
+
+    #[test]
+    fn test_world_map_interactions() {
+        let snapshot = PlayerSnapshot {
+            x: 500.0,
+            y: 64.0,
+            z: -1200.0,
+            eye_x: 500.0,
+            eye_y: 65.62,
+            eye_z: -1200.0,
+            yaw: 90.0,
+            pitch: 0.0,
+            fov: 70.0,
+            dimension: "minecraft:overworld".into(),
+        };
+
+        // 1. Toggle open
+        assert!(!is_world_map_open());
+        toggle_world_map(Some(snapshot.clone()), false, 90.0, 0.0);
+        assert!(is_world_map_open());
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.0)));
+
+        // 2. Zoom in and out
+        world_map_zoom_in();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.5)));
+        world_map_zoom_in(); // Clamped at min
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.5)));
+        world_map_zoom_out();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.0)));
+        world_map_zoom_out();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 2.0)));
+        world_map_zoom_out();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 4.0)));
+        world_map_zoom_out(); // Clamped at max
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 4.0)));
+
+        // Reset to 1.0 bpp
+        world_map_zoom_in();
+        world_map_zoom_in();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.0)));
+
+        // 3. Pan with keys
+        on_world_map_key("key.keyboard.w", true, "key.keyboard.m", "key.keyboard.u", Some(snapshot.clone()));
+        assert_eq!(get_world_map_view(), Some((500.0, -1232.0, 1.0)));
+        on_world_map_key("key.keyboard.d", true, "key.keyboard.m", "key.keyboard.u", Some(snapshot.clone()));
+        assert_eq!(get_world_map_view(), Some((532.0, -1232.0, 1.0)));
+
+        // 4. Center on player
+        world_map_center(Some(snapshot.clone()));
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.0)));
+
+        // 5. Test mouse drag
+        STATE.with_borrow_mut(|s| {
+            s.world_map.screen_width = 800.0;
+            s.world_map.screen_height = 600.0;
+        });
+        start_world_map_drag((400.0, 300.0));
+        // Drag mouse 20px right, 10px down
+        update_world_map_drag((420.0, 310.0));
+        end_world_map_drag();
+        // Since mouse moved right/down, map pan should move left/up (negative dx/dz)
+        STATE.with_borrow(|s| {
+            assert!(s.world_map.pan_x < 500.0);
+            assert!(s.world_map.pan_z < -1200.0);
+        });
+
+        // 6. Right-click to create waypoint
+        let created = on_world_map_right_click(400.0, 300.0, Some(snapshot.clone()));
+        assert!(created);
+        STATE.with_borrow(|s| {
+            assert!(!s.waypoints.is_empty());
+        });
+
+        // 7. Draw HUD while World Map open produces World Map ops
+        let settings = Settings::read(|_| None);
+        let ops = draw_hud(800.0, 600.0, (400.0, 300.0), &snapshot, &settings, |_| 10.0);
+        assert!(ops.iter().any(|op| matches!(op, HudDrawOp::MapTexture { .. })));
+        assert!(ops.iter().any(|op| matches!(op, HudDrawOp::PlayerMarker { .. })));
+
+        // 8. Close with key
+        let act = on_world_map_key("key.keyboard.m", true, "key.keyboard.m", "key.keyboard.u", Some(snapshot.clone()));
+        assert_eq!(act, WorldMapKeyAction::Close);
+        assert!(!is_world_map_open());
+        assert_eq!(take_suppress_mouse_look(), Some((90.0, 0.0)));
     }
 }
