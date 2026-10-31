@@ -99,3 +99,26 @@ bindings = [
   { name = "repeat", ty = "bool", value = "repeat" },
 ]
 
+[[injection]]
+id = "mouse_look"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::Game<'_>::apply_mouse_look"
+helper = "mouse_look.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+[[injection]]
+id = "play_mouse"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::Game<'_>::play_mouse"
+helper = "play_mouse.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "button", ty = "winit::event::MouseButton", value = "button" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+]
+
+
