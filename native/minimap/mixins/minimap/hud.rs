@@ -6,7 +6,7 @@ fn minimap_hud(
 ) {
     use crate::game::official_minimap as m;
     let _ = corners;
-    if !game.native_on(m::ID) {
+    if !game.native_on(m::ID) || game.debug {
         return;
     }
     let Some(player) = game.native_player() else {
