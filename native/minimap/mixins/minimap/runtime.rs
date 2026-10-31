@@ -330,6 +330,8 @@ pub struct WaypointsGuiState {
     pub screen_height: f32,
     pub was_creative: bool,
     pub frozen_look: Option<(f32, f32)>,
+    pub suppress_mouse_frames: u8,
+    pub last_frozen_look: Option<(f32, f32)>,
 }
 
 #[derive(Default)]
@@ -519,10 +521,17 @@ pub fn is_gui_open() -> bool {
     STATE.with_borrow(|s| s.gui.is_open)
 }
 
+fn do_close_gui(gui: &mut WaypointsGuiState) {
+    gui.is_open = false;
+    if let Some(look) = gui.frozen_look.take() {
+        gui.last_frozen_look = Some(look);
+        gui.suppress_mouse_frames = 3;
+    }
+}
+
 pub fn close_gui() {
     STATE.with_borrow_mut(|s| {
-        s.gui.is_open = false;
-        s.gui.frozen_look = None;
+        do_close_gui(&mut s.gui);
     });
 }
 
@@ -531,7 +540,18 @@ pub fn was_creative() -> bool {
 }
 
 pub fn get_frozen_look() -> Option<(f32, f32)> {
-    STATE.with_borrow(|s| s.gui.frozen_look)
+    STATE.with_borrow(|s| s.gui.frozen_look.or(s.gui.last_frozen_look))
+}
+
+pub fn take_suppress_mouse_look() -> Option<(f32, f32)> {
+    STATE.with_borrow_mut(|s| {
+        if s.gui.suppress_mouse_frames > 0 {
+            s.gui.suppress_mouse_frames -= 1;
+            s.gui.last_frozen_look
+        } else {
+            None
+        }
+    })
 }
 
 pub fn toggle_gui(
@@ -542,10 +562,14 @@ pub fn toggle_gui(
 ) -> bool {
     let _ = player;
     STATE.with_borrow_mut(|s| {
-        s.gui.is_open = !s.gui.is_open;
         if s.gui.is_open {
+            do_close_gui(&mut s.gui);
+        } else {
+            s.gui.is_open = true;
             s.gui.was_creative = was_creative;
             s.gui.frozen_look = Some((yaw, pitch));
+            s.gui.last_frozen_look = Some((yaw, pitch));
+            s.gui.suppress_mouse_frames = 0;
             if s.waypoints.is_empty() {
                 s.gui.selected_index = 0;
                 s.gui.name_buffer.clear();
@@ -562,8 +586,6 @@ pub fn toggle_gui(
                     COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
                 s.gui.active_tab = GuiTab::List;
             }
-        } else {
-            s.gui.frozen_look = None;
         }
         s.gui.is_open
     })
@@ -624,7 +646,7 @@ pub fn on_gui_key(
                 }
                 s.gui.active_tab = GuiTab::List;
             } else {
-                s.gui.is_open = false;
+                do_close_gui(&mut s.gui);
             }
             return;
         }
@@ -949,7 +971,7 @@ pub fn on_gui_click(
                 s.waypoints[s.gui.selected_index].name = s.gui.name_buffer.trim().to_string();
                 s.waypoints_dirty = true;
             }
-            s.gui.is_open = false;
+            do_close_gui(&mut s.gui);
             close = true;
             return;
         }
@@ -1911,7 +1933,7 @@ mod tests {
                 rgb: 0x0033_CCFF, // Cyan
                 enabled: true,
             }];
-            s.gui.is_open = false;
+            do_close_gui(&mut s.gui);
         });
 
         // 1. Toggle GUI open
@@ -1990,5 +2012,16 @@ mod tests {
         let done_closed = on_gui_click(410.0, 580.0, None);
         assert!(done_closed);
         assert!(!is_gui_open());
+
+        // 8. Test mouse suppression & frozen look preservation
+        toggle_gui(None, false, 45.0, -15.0);
+        assert!(is_gui_open());
+        assert_eq!(get_frozen_look(), Some((45.0, -15.0)));
+        close_gui();
+        assert!(!is_gui_open());
+        assert_eq!(take_suppress_mouse_look(), Some((45.0, -15.0)));
+        assert_eq!(take_suppress_mouse_look(), Some((45.0, -15.0)));
+        assert_eq!(take_suppress_mouse_look(), Some((45.0, -15.0)));
+        assert_eq!(take_suppress_mouse_look(), None);
     }
 }

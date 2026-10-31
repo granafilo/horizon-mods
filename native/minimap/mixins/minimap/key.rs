@@ -26,9 +26,15 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if m::is_gui_open() {
         if pressed {
             if key == "key.keyboard.escape" || key == waypoints_gui_key {
+                let saved_look = m::get_frozen_look();
                 let was_c = m::was_creative();
                 m::close_gui();
                 game.creative = was_c;
+                if let Some((saved_yaw, saved_pitch)) = saved_look {
+                    game.yaw = saved_yaw;
+                    game.pitch = saved_pitch;
+                }
+                game.mouse = Default::default();
                 if key == "key.keyboard.escape" {
                     // Set to Paused so Horizon's mapped_key(Escape) will execute the
                     // pause-closing branch which transitions cleanly back to
@@ -42,10 +48,16 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 game.keys.clear();
             } else if key == "key.mouse.left" {
                 let (cx, cy) = game.cursor;
+                let saved_look = m::get_frozen_look();
                 let closed = m::on_gui_click(cx, cy, snapshot);
                 if closed {
                     let was_c = m::was_creative();
                     game.creative = was_c;
+                    if let Some((saved_yaw, saved_pitch)) = saved_look {
+                        game.yaw = saved_yaw;
+                        game.pitch = saved_pitch;
+                    }
+                    game.mouse = Default::default();
                     game.screen = crate::game::Screen::Playing;
                     game.capture(true);
                     game.keys.clear();
@@ -68,9 +80,15 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
         if pressed && playing {
             let was_open = m::is_gui_open();
             if was_open {
+                let saved_look = m::get_frozen_look();
                 let was_c = m::was_creative();
                 m::close_gui();
                 game.creative = was_c;
+                if let Some((saved_yaw, saved_pitch)) = saved_look {
+                    game.yaw = saved_yaw;
+                    game.pitch = saved_pitch;
+                }
+                game.mouse = Default::default();
                 game.screen = crate::game::Screen::Playing;
                 game.capture(true);
                 game.keys.clear();
