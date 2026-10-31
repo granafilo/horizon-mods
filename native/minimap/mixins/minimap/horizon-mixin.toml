@@ -86,3 +86,16 @@ bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
 ]
 
+[[injection]]
+id = "mapped_key"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::Game<'_>::mapped_key"
+helper = "mapped_key.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "key", ty = "winit::keyboard::KeyCode", value = "key" },
+  { name = "pressed", ty = "bool", value = "pressed" },
+  { name = "repeat", ty = "bool", value = "repeat" },
+]
+
