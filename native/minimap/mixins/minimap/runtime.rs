@@ -328,6 +328,8 @@ pub struct WaypointsGuiState {
     pub scroll_offset: usize,
     pub screen_width: f32,
     pub screen_height: f32,
+    pub was_creative: bool,
+    pub frozen_look: Option<(f32, f32)>,
 }
 
 #[derive(Default)]
@@ -518,14 +520,32 @@ pub fn is_gui_open() -> bool {
 }
 
 pub fn close_gui() {
-    STATE.with_borrow_mut(|s| s.gui.is_open = false);
+    STATE.with_borrow_mut(|s| {
+        s.gui.is_open = false;
+        s.gui.frozen_look = None;
+    });
 }
 
-pub fn toggle_gui(player: Option<PlayerSnapshot>) {
+pub fn was_creative() -> bool {
+    STATE.with_borrow(|s| s.gui.was_creative)
+}
+
+pub fn get_frozen_look() -> Option<(f32, f32)> {
+    STATE.with_borrow(|s| s.gui.frozen_look)
+}
+
+pub fn toggle_gui(
+    player: Option<PlayerSnapshot>,
+    was_creative: bool,
+    yaw: f32,
+    pitch: f32,
+) -> bool {
     let _ = player;
     STATE.with_borrow_mut(|s| {
         s.gui.is_open = !s.gui.is_open;
         if s.gui.is_open {
+            s.gui.was_creative = was_creative;
+            s.gui.frozen_look = Some((yaw, pitch));
             if s.waypoints.is_empty() {
                 s.gui.selected_index = 0;
                 s.gui.name_buffer.clear();
@@ -542,8 +562,11 @@ pub fn toggle_gui(player: Option<PlayerSnapshot>) {
                     COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
                 s.gui.active_tab = GuiTab::List;
             }
+        } else {
+            s.gui.frozen_look = None;
         }
-    });
+        s.gui.is_open
+    })
 }
 
 pub fn key_to_char(key: &str, current_text: &str) -> Option<char> {
@@ -949,7 +972,11 @@ pub fn draw_waypoints_gui(
         s.gui.screen_width = screen_width;
         s.gui.screen_height = screen_height;
 
-        // 1. Menu background (in-world dirt/dark vignette)
+        // 1. Fullscreen dark backdrop & menu background
+        ops.push(HudDrawOp::Fill {
+            rect: [0.0, 0.0, screen_width, screen_height],
+            argb: 0xD010_1010,
+        });
         ops.push(HudDrawOp::MenuBackground {
             rect: [0.0, 0.0, screen_width, screen_height],
         });
@@ -1023,10 +1050,14 @@ pub fn draw_waypoints_gui(
             }
         }
 
-        // 4. List Container Background
+        // 4. List Container Background & Separators
         let list_top = 48.0;
         let list_bottom = (screen_height - 60.0).max(list_top + 40.0);
         ops.push(HudDrawOp::ListBackground {
+            top: list_top,
+            bottom: list_bottom,
+        });
+        ops.push(HudDrawOp::Separators {
             top: list_top,
             bottom: list_bottom,
         });
@@ -1415,6 +1446,7 @@ pub enum HudDrawOp {
     Text { text: String, at: [f32; 2], rgb: u32, shadow: bool },
     MenuBackground { rect: [f32; 4] },
     ListBackground { top: f32, bottom: f32 },
+    Separators { top: f32, bottom: f32 },
     Button { rect: [f32; 4], label: String, active: bool, hover: bool },
     CenteredText { text: String, y: f32, color: u32 },
 }
@@ -1884,7 +1916,7 @@ mod tests {
 
         // 1. Toggle GUI open
         assert!(!is_gui_open());
-        toggle_gui(None);
+        toggle_gui(None, false, 0.0, 0.0);
         assert!(is_gui_open());
         STATE.with_borrow(|s| {
             assert_eq!(s.gui.selected_index, 0);
@@ -1937,7 +1969,7 @@ mod tests {
         assert!(!is_gui_open());
 
         // 7. Test Mouse Click Interactions
-        toggle_gui(None);
+        toggle_gui(None, false, 0.0, 0.0);
         assert!(is_gui_open());
         // Set dimensions for layout
         STATE.with_borrow_mut(|s| {

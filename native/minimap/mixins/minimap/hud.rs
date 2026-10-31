@@ -12,6 +12,22 @@ fn minimap_hud(
     let Some(player) = game.native_player() else {
         return;
     };
+
+    if m::is_gui_open() {
+        batch.vertices.clear();
+        batch.blends.clear();
+        batch.patches.clear();
+
+        game.captured = true;
+        game.creative = true;
+        game.attack_clicks = 0;
+        game.keys.clear();
+        if let Some((y, p)) = m::get_frozen_look() {
+            game.yaw = y;
+            game.pitch = p;
+        }
+    }
+
     let settings = m::settings(|key| game.native_setting(m::ID, key));
     let (cam_x, cam_y, cam_z, fov) = match game.locator_camera {
         Some((pos, _, _, fov)) => (pos[0], pos[1], pos[2], fov),
@@ -59,6 +75,15 @@ fn minimap_hud(
             }
             m::HudDrawOp::ListBackground { top, bottom } => {
                 horizon_client::ui::list_background(
+                    batch,
+                    &game.gui.atlas,
+                    top,
+                    bottom,
+                    true,
+                );
+            }
+            m::HudDrawOp::Separators { top, bottom } => {
+                horizon_client::ui::separators(
                     batch,
                     &game.gui.atlas,
                     top,

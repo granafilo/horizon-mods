@@ -26,17 +26,32 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if m::is_gui_open() {
         if pressed {
             if key == "key.keyboard.escape" || key == waypoints_gui_key {
+                let was_c = m::was_creative();
                 m::close_gui();
-                game.screen = crate::game::Screen::Playing;
-                game.pause_menu = true;
-                game.capture(true);
+                game.creative = was_c;
+                if key == "key.keyboard.escape" {
+                    // Set to Paused so Horizon's mapped_key(Escape) will execute the
+                    // pause-closing branch which transitions cleanly back to
+                    // Screen::Playing with capture(true), without opening the pause menu!
+                    game.screen = crate::game::Screen::Paused;
+                    game.pause_menu = false;
+                } else {
+                    game.screen = crate::game::Screen::Playing;
+                    game.capture(true);
+                }
+                game.keys.clear();
             } else if key == "key.mouse.left" {
                 let (cx, cy) = game.cursor;
                 let closed = m::on_gui_click(cx, cy, snapshot);
                 if closed {
+                    let was_c = m::was_creative();
+                    game.creative = was_c;
                     game.screen = crate::game::Screen::Playing;
-                    game.pause_menu = true;
                     game.capture(true);
+                    game.keys.clear();
+                } else {
+                    game.attack_clicks = 0;
+                    game.keys.clear();
                 }
             } else {
                 m::on_gui_key(key, true, &waypoints_gui_key, snapshot);
@@ -51,12 +66,24 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
 
     if key == waypoints_gui_key {
         if pressed && playing {
-            m::toggle_gui(snapshot);
-            if m::is_gui_open() {
-                game.screen = crate::game::Screen::Paused;
-                game.pause_menu = false;
-                game.capture(false);
+            let was_open = m::is_gui_open();
+            if was_open {
+                let was_c = m::was_creative();
+                m::close_gui();
+                game.creative = was_c;
+                game.screen = crate::game::Screen::Playing;
+                game.capture(true);
                 game.keys.clear();
+            } else {
+                let opened = m::toggle_gui(snapshot, game.creative, game.yaw, game.pitch);
+                if opened {
+                    // Release OS cursor grab and show mouse cursor
+                    game.capture(false);
+                    // Mark captured = true so game.rs forwards mouse clicks to extras_mouse
+                    game.captured = true;
+                    game.creative = true;
+                    game.keys.clear();
+                }
             }
         }
         return;
