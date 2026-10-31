@@ -136,6 +136,7 @@ pub struct Settings {
     pub rotate: bool,
     pub show_hud_pings: bool,
     pub show_minimap_pings: bool,
+    pub show_coords: bool,
 }
 
 impl Settings {
@@ -158,6 +159,7 @@ impl Settings {
             rotate: get("rotate").as_deref() == Some("true"),
             show_hud_pings: get("hud_pings").as_deref() != Some("false"),
             show_minimap_pings: get("minimap_pings").as_deref() != Some("false"),
+            show_coords: get("show_coords").as_deref() != Some("false"),
         }
     }
 
@@ -187,6 +189,10 @@ impl Settings {
                 "Minimap Pins: {}",
                 if self.show_minimap_pings { "ON" } else { "OFF" }
             ),
+            format!(
+                "Coordinates & Facing: {}",
+                if self.show_coords { "ON" } else { "OFF" }
+            ),
         ]
     }
 
@@ -200,11 +206,12 @@ impl Settings {
             4 => self.rotate = !self.rotate,
             5 => self.show_hud_pings = !self.show_hud_pings,
             6 => self.show_minimap_pings = !self.show_minimap_pings,
+            7 => self.show_coords = !self.show_coords,
             _ => {}
         }
     }
 
-    pub fn stored(&self) -> [(&'static str, String); 7] {
+    pub fn stored(&self) -> [(&'static str, String); 8] {
         [
             ("corner", CORNERS[self.corner].0.to_owned()),
             ("size", SIZES[self.size].0.to_string()),
@@ -225,11 +232,29 @@ impl Settings {
                 "minimap_pings",
                 if self.show_minimap_pings { "true" } else { "false" }.to_owned(),
             ),
+            (
+                "show_coords",
+                if self.show_coords { "true" } else { "false" }.to_owned(),
+            ),
         ]
     }
 
     pub fn view(&self) -> (f32, f32) {
         (f32::from(SIZES[self.size].0), ZOOMS[self.zoom])
+    }
+}
+
+/// Returns the cardinal facing direction name and axis representation.
+pub fn cardinal_facing(yaw: f32) -> &'static str {
+    let y = ((yaw + 180.0) % 360.0) - 180.0;
+    if (-45.0..45.0).contains(&y) {
+        "South (+Z)"
+    } else if (45.0..135.0).contains(&y) {
+        "West (-X)"
+    } else if (-135.0..-45.0).contains(&y) {
+        "East (+X)"
+    } else {
+        "North (-Z)"
     }
 }
 
@@ -658,6 +683,50 @@ pub fn draw_hud(
         }
     });
 
+    // 3. Quick Info Overlay (Coordinates & Facing Direction)
+    if settings.show_coords {
+        let (bx, by, bz) = (player.x.floor() as i32, player.y.floor() as i32, player.z.floor() as i32);
+        let coords_text = format!("XYZ: {}, {}, {}", bx, by, bz);
+        let facing_text = format!("Facing: {}", cardinal_facing(player.yaw));
+
+        let cw = text_width(&coords_text);
+        let fw = text_width(&facing_text);
+        let box_w = cw.max(fw) + 6.0;
+        let box_h = 21.0;
+
+        // Position below or above the minimap
+        let is_top = settings.corner <= 1;
+        let is_left = settings.corner == 0 || settings.corner == 2;
+
+        let ox = if is_left {
+            map_x
+        } else {
+            map_x + map_size - box_w
+        };
+        let oy = if is_top {
+            map_y + map_size + 3.0
+        } else {
+            map_y - box_h - 3.0
+        };
+
+        ops.push(HudDrawOp::Fill {
+            rect: [ox, oy, box_w, box_h],
+            argb: 0x7800_0000,
+        });
+        ops.push(HudDrawOp::Text {
+            text: coords_text,
+            at: [ox + 3.0, oy + 2.0],
+            rgb: 0x00FF_FFFF, // White
+            shadow: true,
+        });
+        ops.push(HudDrawOp::Text {
+            text: facing_text,
+            at: [ox + 3.0, oy + 11.0],
+            rgb: 0x00AA_AAAA, // Muted grey
+            shadow: true,
+        });
+    }
+
     ops
 }
 
@@ -692,8 +761,8 @@ mod tests {
         let none = |_: &str| None;
         let s = Settings::read(none);
         assert_eq!(
-            (s.corner, s.size, s.round, s.zoom, s.rotate, s.show_hud_pings, s.show_minimap_pings),
-            (1, 1, false, 1, false, true, true)
+            (s.corner, s.size, s.round, s.zoom, s.rotate, s.show_hud_pings, s.show_minimap_pings, s.show_coords),
+            (1, 1, false, 1, false, true, true, true)
         );
 
         let files = [
@@ -704,17 +773,31 @@ mod tests {
             ("rotate", "true"),
             ("hud_pings", "false"),
             ("minimap_pings", "true"),
+            ("show_coords", "true"),
         ];
         let get = |k: &str| files.iter().find(|f| f.0 == k).map(|f| f.1.to_owned());
         let mut s = Settings::read(get);
         assert_eq!(s.view(), (128.0, 0.5));
         assert!(!s.show_hud_pings);
         assert!(s.show_minimap_pings);
+        assert!(s.show_coords);
 
         s.click(5); // toggle hud_pings
         assert!(s.show_hud_pings);
+        s.click(7); // toggle show_coords
+        assert!(!s.show_coords);
         let stored = s.stored();
         assert_eq!(stored[5], ("hud_pings", "true".to_owned()));
+        assert_eq!(stored[7], ("show_coords", "false".to_owned()));
+    }
+
+    #[test]
+    fn test_cardinal_facing() {
+        assert_eq!(cardinal_facing(0.0), "South (+Z)");
+        assert_eq!(cardinal_facing(90.0), "West (-X)");
+        assert_eq!(cardinal_facing(180.0), "North (-Z)");
+        assert_eq!(cardinal_facing(-90.0), "East (+X)");
+        assert_eq!(cardinal_facing(270.0), "East (+X)");
     }
 
     #[test]
