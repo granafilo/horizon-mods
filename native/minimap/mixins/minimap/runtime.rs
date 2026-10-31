@@ -1,16 +1,24 @@
-// Horizon's official Minimap, formerly the WebAssembly mod and before that a
-// built-in extra: a map of the terrain around the player in a corner, in map
-// colours, square or round, north up or turning with the player, drawn by
-// Horizon's own minimap. Its settings are the WebAssembly mod's files
-// (`horizon-mods/.horizon-mod-data/minimap/corner`, `size`, `shape`, `zoom`,
-// `rotate`), so a player keeps them. This file is both the mod's Cargo
-// library (its tests) and the module the bundle adds to the game.
+// Horizon's official Minimap, extended with Quick Ping and Waypoint system (Xaero's Style).
+use std::cell::RefCell;
 
 /// The mod's id (its settings folder), name and version.
 pub const ID: &str = "minimap";
 pub const NAME: &str = "Minimap";
-pub const VERSION: &str = "2.0.0";
-pub const DESCRIPTION: &str = "A map of the terrain around you in a corner, in map colours, square or round, north up or turning with you. Horizon's own.";
+pub const VERSION: &str = "2.1.0";
+pub const DESCRIPTION: &str =
+    "A map of the terrain with Xaero's style Quick Ping and Waypoints.";
+
+/// Key bind identifiers and defaults.
+pub const KEY_PING: &str = "ping";
+pub const DEFAULT_PING_KEY: &str = "key.keyboard.v";
+pub const KEY_WAYPOINT: &str = "waypoint";
+pub const DEFAULT_WAYPOINT_KEY: &str = "key.keyboard.b";
+
+/// Quick ping lifetime in ticks (20 ticks = 1 sec -> 200 ticks = 10 sec).
+pub const PING_LIFETIME_TICKS: u32 = 200;
+/// Maximum raycast reach in blocks.
+pub const RAYCAST_MAX_REACH: f64 = 128.0;
+
 /// The corners, as the settings files name them and the page labels them.
 pub const CORNERS: [(&str, &str); 4] = [
     ("top_left", "Top left"),
@@ -22,6 +30,101 @@ pub const CORNERS: [(&str, &str); 4] = [
 pub const SIZES: [(u8, &str); 3] = [(64, "Small"), (96, "Medium"), (128, "Large")];
 pub const ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
 
+/// Waypoint data structure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Waypoint {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub dimension: String,
+    pub name: String,
+    pub rgb: u32,
+    pub enabled: bool,
+}
+
+pub const KEY_WAYPOINTS: &str = "waypoints";
+
+impl Waypoint {
+    pub fn distance_to(&self, px: f64, py: f64, pz: f64) -> f64 {
+        let dx = self.x - px;
+        let dy = self.y - py;
+        let dz = self.z - pz;
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    /// Serializes a waypoint to a TSV string: name\tx\ty\tz\tdimension\trgb_hex\tenabled
+    pub fn serialize(&self) -> String {
+        format!(
+            "{}\t{:.2}\t{:.2}\t{:.2}\t{}\t{:06X}\t{}",
+            self.name.replace('\t', " "),
+            self.x,
+            self.y,
+            self.z,
+            self.dimension,
+            self.rgb & 0x00FF_FFFF,
+            self.enabled
+        )
+    }
+
+    /// Deserializes a waypoint from a TSV line.
+    pub fn deserialize(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.trim().split('\t').collect();
+        if parts.len() < 7 {
+            return None;
+        }
+        let name = parts[0].to_owned();
+        let x = parts[1].parse::<f64>().ok()?;
+        let y = parts[2].parse::<f64>().ok()?;
+        let z = parts[3].parse::<f64>().ok()?;
+        let dimension = parts[4].to_owned();
+        let rgb = u32::from_str_radix(parts[5], 16).ok()?;
+        let enabled = parts[6].eq_ignore_ascii_case("true");
+        Some(Self {
+            x,
+            y,
+            z,
+            dimension,
+            name,
+            rgb,
+            enabled,
+        })
+    }
+}
+
+/// Ping data structure (temporary marker with fade-out).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ping {
+    pub waypoint: Waypoint,
+    pub remaining_ticks: u32,
+    pub initial_ticks: u32,
+}
+
+impl Ping {
+    pub fn new(x: f64, y: f64, z: f64, dimension: String, name: String, rgb: u32, ticks: u32) -> Self {
+        Self {
+            waypoint: Waypoint {
+                x,
+                y,
+                z,
+                dimension,
+                name,
+                rgb,
+                enabled: true,
+            },
+            remaining_ticks: ticks,
+            initial_ticks: ticks,
+        }
+    }
+
+    pub fn alpha(&self) -> f32 {
+        if self.initial_ticks == 0 {
+            0.0
+        } else {
+            (self.remaining_ticks as f32 / self.initial_ticks as f32).clamp(0.0, 1.0)
+        }
+    }
+}
+
 /// The settings, as the WebAssembly Minimap kept them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
@@ -31,11 +134,12 @@ pub struct Settings {
     pub round: bool,
     pub zoom: usize,
     pub rotate: bool,
+    pub show_hud_pings: bool,
+    pub show_minimap_pings: bool,
 }
 
 impl Settings {
-    /// From the stored values; the extra's defaults (top right, medium,
-    /// square, 1 block per pixel, north up) for the ones missing.
+    /// From the stored values; the defaults for the ones missing.
     pub fn read(get: impl Fn(&str) -> Option<String>) -> Self {
         let get = |key: &str| get(key).map(|v| v.trim().to_owned());
         let find = |key: &str, values: &[String], default: usize| {
@@ -52,8 +156,11 @@ impl Settings {
             round: get("shape").as_deref() == Some("round"),
             zoom: find("zoom", &zooms, 1),
             rotate: get("rotate").as_deref() == Some("true"),
+            show_hud_pings: get("hud_pings").as_deref() != Some("false"),
+            show_minimap_pings: get("minimap_pings").as_deref() != Some("false"),
         }
     }
+
     pub fn labels(&self) -> Vec<String> {
         let n = ZOOMS[self.zoom];
         let blocks = if n < 1.0 {
@@ -72,8 +179,17 @@ impl Settings {
                 "Turn with the player: {}",
                 if self.rotate { "ON" } else { "OFF" }
             ),
+            format!(
+                "In-World HUD Pins: {}",
+                if self.show_hud_pings { "ON" } else { "OFF" }
+            ),
+            format!(
+                "Minimap Pins: {}",
+                if self.show_minimap_pings { "ON" } else { "OFF" }
+            ),
         ]
     }
+
     pub fn click(&mut self, i: usize) {
         let next = |i: usize, n: usize| (i + 1) % n;
         match i {
@@ -82,10 +198,13 @@ impl Settings {
             2 => self.round = !self.round,
             3 => self.zoom = next(self.zoom, ZOOMS.len()),
             4 => self.rotate = !self.rotate,
+            5 => self.show_hud_pings = !self.show_hud_pings,
+            6 => self.show_minimap_pings = !self.show_minimap_pings,
             _ => {}
         }
     }
-    pub fn stored(&self) -> [(&'static str, String); 5] {
+
+    pub fn stored(&self) -> [(&'static str, String); 7] {
         [
             ("corner", CORNERS[self.corner].0.to_owned()),
             ("size", SIZES[self.size].0.to_string()),
@@ -98,31 +217,448 @@ impl Settings {
                 "rotate",
                 if self.rotate { "true" } else { "false" }.to_owned(),
             ),
+            (
+                "hud_pings",
+                if self.show_hud_pings { "true" } else { "false" }.to_owned(),
+            ),
+            (
+                "minimap_pings",
+                if self.show_minimap_pings { "true" } else { "false" }.to_owned(),
+            ),
         ]
     }
-    /// What Horizon's minimap draws: (side, blocks per pixel).
+
     pub fn view(&self) -> (f32, f32) {
         (f32::from(SIZES[self.size].0), ZOOMS[self.zoom])
     }
 }
 
+/// Raycast view vector from yaw and pitch (degrees).
+/// Horizon yaw: 0 faces south (+Z), 90 faces west (-X).
+pub fn view_vector(yaw: f32, pitch: f32) -> [f64; 3] {
+    let y = f64::from(yaw).to_radians();
+    let p = f64::from(pitch).to_radians();
+    [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()]
+}
+
+/// Simple eye-ray projection to estimate target coordinate up to `max_distance` blocks.
+pub fn raycast_target(
+    player_pos: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    eye_height: f64,
+    max_distance: f64,
+) -> [f64; 3] {
+    let dir = view_vector(yaw, pitch);
+    [
+        player_pos[0] + dir[0] * max_distance,
+        player_pos[1] + eye_height + dir[1] * max_distance,
+        player_pos[2] + dir[2] * max_distance,
+    ]
+}
+
+/// Player snapshot info passed from the hook.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerSnapshot {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub eye_x: f64,
+    pub eye_y: f64,
+    pub eye_z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub fov: f32,
+    pub dimension: String,
+}
+
+#[derive(Default)]
+pub struct RuntimeState {
+    pub settings: Option<Settings>,
+    pub pings: Vec<Ping>,
+    pub waypoints: Vec<Waypoint>,
+    pub waypoints_loaded: bool,
+    pub waypoints_dirty: bool,
+}
+
 thread_local! {
-    /// The settings, read once from the files, then kept.
-    static SETTINGS: std::cell::Cell<Option<Settings>> = const { std::cell::Cell::new(None) };
+    static STATE: RefCell<RuntimeState> = RefCell::new(RuntimeState::default());
+}
+
+/// Loads waypoints from storage via reader if not already loaded.
+pub fn load_waypoints(get: impl Fn(&str) -> Option<String>) {
+    STATE.with_borrow_mut(|s| {
+        if s.waypoints_loaded {
+            return;
+        }
+        s.waypoints_loaded = true;
+        if let Some(content) = get(KEY_WAYPOINTS) {
+            s.waypoints.clear();
+            for line in content.lines() {
+                if let Some(wp) = Waypoint::deserialize(line) {
+                    s.waypoints.push(wp);
+                }
+            }
+        }
+    });
+}
+
+/// Encodes all current waypoints for saving.
+pub fn save_waypoints_content() -> String {
+    STATE.with_borrow(|s| {
+        let lines: Vec<String> = s.waypoints.iter().map(|wp| wp.serialize()).collect();
+        lines.join("\n")
+    })
+}
+
+/// Checks if waypoints need saving, and clears the dirty flag if so.
+pub fn take_waypoints_dirty() -> bool {
+    STATE.with_borrow_mut(|s| {
+        if s.waypoints_dirty {
+            s.waypoints_dirty = false;
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// The settings, read once through `get` (one file per key).
 pub fn settings(get: impl Fn(&str) -> Option<String>) -> Settings {
-    SETTINGS.with(|s| {
-        let found = s.get().unwrap_or_else(|| Settings::read(get));
-        s.set(Some(found));
-        found
-    })
+    load_waypoints(&get);
+    STATE.with_borrow_mut(|s| *s.settings.get_or_insert_with(|| Settings::read(get)))
 }
 
-/// Replaces the settings (the settings page changed them).
+/// Replaces the settings.
 pub fn set_settings(settings: Settings) {
-    SETTINGS.with(|s| s.set(Some(settings)));
+    STATE.with_borrow_mut(|s| s.settings = Some(settings));
+}
+
+/// Adds a quick ping.
+pub fn add_ping(ping: Ping) {
+    STATE.with_borrow_mut(|s| {
+        s.pings.push(ping);
+    });
+}
+
+/// Adds a persistent waypoint.
+pub fn add_waypoint(waypoint: Waypoint) {
+    STATE.with_borrow_mut(|s| {
+        s.waypoints.push(waypoint);
+        s.waypoints_dirty = true;
+    });
+}
+
+/// Periodic tick: decrement remaining ticks and remove expired pings.
+pub fn tick() {
+    STATE.with_borrow_mut(|s| {
+        for ping in &mut s.pings {
+            if ping.remaining_ticks > 0 {
+                ping.remaining_ticks -= 1;
+            }
+        }
+        s.pings.retain(|p| p.remaining_ticks > 0);
+    });
+}
+
+/// Ping key pressed.
+pub fn on_ping_key(
+    playing: bool,
+    pressed: bool,
+    player: Option<impl Into<PlayerSnapshot>>,
+) {
+    if !playing || !pressed {
+        return;
+    }
+    let Some(player) = player.map(Into::into) else {
+        return;
+    };
+    let target = raycast_target(
+        [player.x, player.y, player.z],
+        player.yaw,
+        player.pitch,
+        1.62,
+        32.0, // default quick ping reach
+    );
+    let ping = Ping::new(
+        target[0],
+        target[1],
+        target[2],
+        player.dimension,
+        "Ping".to_owned(),
+        0x00FF_AA00, // Vibrant orange/amber
+        PING_LIFETIME_TICKS,
+    );
+    add_ping(ping);
+}
+
+/// Waypoint key pressed.
+pub fn on_waypoint_key(
+    playing: bool,
+    pressed: bool,
+    player: Option<impl Into<PlayerSnapshot>>,
+) {
+    if !playing || !pressed {
+        return;
+    }
+    let Some(player) = player.map(Into::into) else {
+        return;
+    };
+    let count = STATE.with_borrow(|s| s.waypoints.len() + 1);
+    let wp = Waypoint {
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        dimension: player.dimension,
+        name: format!("Waypoint #{count}"),
+        rgb: 0x0033_CCFF, // Cyan
+        enabled: true,
+    };
+    add_waypoint(wp);
+}
+
+/// Calculate 2D position on minimap for a target coordinate.
+/// Returns relative (dx, dy) in GUI pixels from minimap center, and whether it was clamped.
+pub fn project_to_minimap(
+    target_x: f64,
+    target_z: f64,
+    player_x: f64,
+    player_z: f64,
+    player_yaw: f32,
+    rotate_with_player: bool,
+    blocks_per_pixel: f32,
+    minimap_radius: f32,
+) -> (f32, f32, bool) {
+    let diff_x = (target_x - player_x) as f32;
+    let diff_z = (target_z - player_z) as f32;
+
+    let (mut rx, mut ry) = if !rotate_with_player {
+        // North is up (-Z), East is right (+X), South is down (+Z), West is left (-X)
+        (diff_x / blocks_per_pixel, diff_z / blocks_per_pixel)
+    } else {
+        // Match Horizon's internal minimap axes:
+        // axes: r = [-c, -s], f = [-s, c]
+        // wx = view.x + bpp * (u * r[0] - v * f[0])
+        // wz = view.z + bpp * (u * r[1] - v * f[1])
+        // Inverting this mapping:
+        let (s, c) = (player_yaw as f64).to_radians().sin_cos();
+        let r = [-c, -s];
+        let f = [-s, c];
+        let det = (f[0] * r[1] - r[0] * f[1]) as f32;
+        let u = ((-f[1] as f32 * diff_x + f[0] as f32 * diff_z) / det) / blocks_per_pixel;
+        let v = ((-r[1] as f32 * diff_x + r[0] as f32 * diff_z) / det) / blocks_per_pixel;
+        (u, v)
+    };
+
+    let dist = (rx * rx + ry * ry).sqrt();
+    let clamped = dist > minimap_radius;
+    if clamped && dist > 0.0 {
+        rx = (rx / dist) * minimap_radius;
+        ry = (ry / dist) * minimap_radius;
+    }
+    (rx, ry, clamped)
+}
+
+/// Project in-world 3D point to screen coordinates.
+/// Returns Some([screen_x, screen_y]) if in front of player, or None if behind.
+pub fn project_in_world_hud(
+    target: [f64; 3],
+    player_eye: [f64; 3],
+    yaw: f32,
+    pitch: f32,
+    screen_width: f32,
+    screen_height: f32,
+    fov_degrees: f32,
+) -> Option<[f32; 2]> {
+    let dx = (target[0] - player_eye[0]) as f32;
+    let dy = (target[1] - player_eye[1]) as f32;
+    let dz = (target[2] - player_eye[2]) as f32;
+
+    let (sy, cy) = (yaw as f32).to_radians().sin_cos();
+    let (sp, cp) = (pitch as f32).to_radians().sin_cos();
+
+    // In Horizon's camera coordinate system:
+    // Right on screen is positive x_cam:
+    let x_cam = -(dx * cy + dz * sy);
+    // Horizontal forward distance:
+    let z_horiz = -dx * sy + dz * cy;
+
+    // Pitch transformation:
+    let y_cam = dy * cp + z_horiz * sp;
+    let z_forward = z_horiz * cp - dy * sp;
+
+    // Discard points behind the camera:
+    if z_forward <= 0.1 {
+        return None;
+    }
+
+    let aspect = screen_width / screen_height.max(1.0);
+    let tan_half_fov = ((fov_degrees * 0.5) as f32).to_radians().tan();
+
+    let ndc_x = x_cam / (z_forward * tan_half_fov * aspect);
+    let ndc_y = y_cam / (z_forward * tan_half_fov);
+
+    let sx = (ndc_x + 1.0) * 0.5 * screen_width;
+    let sy = (1.0 - ndc_y) * 0.5 * screen_height;
+
+    Some([sx, sy])
+}
+
+/// Top-left position of the minimap box given screen dimensions and settings.
+pub fn minimap_rect(corner_idx: usize, size: f32, screen_width: f32, screen_height: f32) -> (f32, f32) {
+    const MARGIN: f32 = 2.0;
+    match corner_idx {
+        0 => (MARGIN, MARGIN), // Top Left
+        1 => (screen_width - MARGIN - size, MARGIN), // Top Right
+        2 => (MARGIN, screen_height - MARGIN - size), // Bottom Left
+        _ => (screen_width - MARGIN - size, screen_height - MARGIN - size), // Bottom Right
+    }
+}
+
+/// Operations to draw on HUD.
+#[derive(Clone, Debug)]
+pub enum HudDrawOp {
+    Fill { rect: [f32; 4], argb: u32 },
+    Text { text: String, at: [f32; 2], rgb: u32, shadow: bool },
+}
+
+/// Draw HUD and Minimap markers.
+/// Computes drawing operations into a Vec to avoid multiple mutable closures in native_hud.
+pub fn draw_hud(
+    screen_width: f32,
+    screen_height: f32,
+    player: &PlayerSnapshot,
+    settings: &Settings,
+    text_width: impl Fn(&str) -> f32,
+) -> Vec<HudDrawOp> {
+    let mut ops = Vec::new();
+    let (map_size, blocks_per_pixel) = settings.view();
+    let (map_x, map_y) = minimap_rect(settings.corner, map_size, screen_width, screen_height);
+    let map_center = [map_x + map_size / 2.0, map_y + map_size / 2.0];
+    let map_radius = map_size / 2.0 - 2.0;
+
+    STATE.with_borrow(|s| {
+        // 1. Draw Active Pings
+        for ping in &s.pings {
+            if ping.waypoint.dimension != player.dimension {
+                continue;
+            }
+            let dist = ping.waypoint.distance_to(player.x, player.y, player.z);
+            let alpha_byte = ((ping.alpha() * 255.0) as u32).clamp(0, 255);
+            let color_argb = (alpha_byte << 24) | (ping.waypoint.rgb & 0x00FF_FFFF);
+
+            // Minimap marker
+            if settings.show_minimap_pings {
+                let (mx, my, _clamped) = project_to_minimap(
+                    ping.waypoint.x,
+                    ping.waypoint.z,
+                    player.x,
+                    player.z,
+                    player.yaw,
+                    settings.rotate,
+                    blocks_per_pixel,
+                    map_radius,
+                );
+                let px = map_center[0] + mx;
+                let py = map_center[1] + my;
+                ops.push(HudDrawOp::Fill {
+                    rect: [px - 2.0, py - 2.0, 4.0, 4.0],
+                    argb: color_argb,
+                });
+            }
+
+            // In-World HUD marker
+            if settings.show_hud_pings {
+                if let Some([sx, sy]) = project_in_world_hud(
+                    [ping.waypoint.x, ping.waypoint.y, ping.waypoint.z],
+                    [player.eye_x, player.eye_y, player.eye_z],
+                    player.yaw,
+                    player.pitch,
+                    screen_width,
+                    screen_height,
+                    player.fov,
+                ) {
+                    ops.push(HudDrawOp::Fill {
+                        rect: [sx - 3.0, sy - 3.0, 6.0, 6.0],
+                        argb: color_argb,
+                    });
+                    let label = format!("[Ping: {}m]", dist.round() as i32);
+                    let lw = text_width(&label);
+                    ops.push(HudDrawOp::Fill {
+                        rect: [sx - lw / 2.0 - 2.0, sy + 5.0, lw + 4.0, 10.0],
+                        argb: 0x7800_0000,
+                    });
+                    ops.push(HudDrawOp::Text {
+                        text: label,
+                        at: [sx - lw / 2.0, sy + 6.0],
+                        rgb: ping.waypoint.rgb,
+                        shadow: true,
+                    });
+                }
+            }
+        }
+
+        // 2. Draw Waypoints
+        for wp in &s.waypoints {
+            if !wp.enabled || wp.dimension != player.dimension {
+                continue;
+            }
+            let dist = wp.distance_to(player.x, player.y, player.z);
+            let color_argb = 0xFF00_0000 | (wp.rgb & 0x00FF_FFFF);
+
+            // Minimap marker
+            if settings.show_minimap_pings {
+                let (mx, my, _clamped) = project_to_minimap(
+                    wp.x,
+                    wp.z,
+                    player.x,
+                    player.z,
+                    player.yaw,
+                    settings.rotate,
+                    blocks_per_pixel,
+                    map_radius,
+                );
+                let px = map_center[0] + mx;
+                let py = map_center[1] + my;
+                ops.push(HudDrawOp::Fill {
+                    rect: [px - 2.0, py - 2.0, 4.0, 4.0],
+                    argb: color_argb,
+                });
+            }
+
+            // In-World HUD marker
+            if settings.show_hud_pings {
+                if let Some([sx, sy]) = project_in_world_hud(
+                    [wp.x, wp.y, wp.z],
+                    [player.eye_x, player.eye_y, player.eye_z],
+                    player.yaw,
+                    player.pitch,
+                    screen_width,
+                    screen_height,
+                    player.fov,
+                ) {
+                    ops.push(HudDrawOp::Fill {
+                        rect: [sx - 3.0, sy - 3.0, 6.0, 6.0],
+                        argb: color_argb,
+                    });
+                    let label = format!("{} ({}m)", wp.name, dist.round() as i32);
+                    let lw = text_width(&label);
+                    ops.push(HudDrawOp::Fill {
+                        rect: [sx - lw / 2.0 - 2.0, sy + 5.0, lw + 4.0, 10.0],
+                        argb: 0x7800_0000,
+                    });
+                    ops.push(HudDrawOp::Text {
+                        text: label,
+                        at: [sx - lw / 2.0, sy + 6.0],
+                        rgb: wp.rgb,
+                        shadow: true,
+                    });
+                }
+            }
+        }
+    });
+
+    ops
 }
 
 #[cfg(test)]
@@ -130,38 +666,152 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_and_writes_the_webassembly_mods_settings() {
+    fn test_waypoint_serialization() {
+        let wp1 = Waypoint {
+            x: 123.45,
+            y: 64.0,
+            z: -789.12,
+            dimension: "minecraft:overworld".into(),
+            name: "Village Base".into(),
+            rgb: 0x33CCFF,
+            enabled: true,
+        };
+        let s = wp1.serialize();
+        let wp2 = Waypoint::deserialize(&s).expect("deserialization failed");
+        assert_eq!(wp1.name, wp2.name);
+        assert!((wp1.x - wp2.x).abs() < 0.01);
+        assert!((wp1.y - wp2.y).abs() < 0.01);
+        assert!((wp1.z - wp2.z).abs() < 0.01);
+        assert_eq!(wp1.dimension, wp2.dimension);
+        assert_eq!(wp1.rgb, wp2.rgb);
+        assert_eq!(wp1.enabled, wp2.enabled);
+    }
+
+    #[test]
+    fn test_settings_read_and_write() {
         let none = |_: &str| None;
         let s = Settings::read(none);
         assert_eq!(
-            (s.corner, s.size, s.round, s.zoom, s.rotate),
-            (1, 1, false, 1, false)
+            (s.corner, s.size, s.round, s.zoom, s.rotate, s.show_hud_pings, s.show_minimap_pings),
+            (1, 1, false, 1, false, true, true)
         );
+
         let files = [
             ("corner", "bottom_left"),
             ("size", "128\n"),
             ("shape", "round"),
             ("zoom", "0.5"),
             ("rotate", "true"),
+            ("hud_pings", "false"),
+            ("minimap_pings", "true"),
         ];
         let get = |k: &str| files.iter().find(|f| f.0 == k).map(|f| f.1.to_owned());
         let mut s = Settings::read(get);
         assert_eq!(s.view(), (128.0, 0.5));
-        assert_eq!(
-            s.labels(),
-            [
-                "Corner: Bottom left",
-                "Size: Large",
-                "Shape: Round",
-                "Zoom: ½ block per pixel",
-                "Turn with the player: ON"
-            ]
+        assert!(!s.show_hud_pings);
+        assert!(s.show_minimap_pings);
+
+        s.click(5); // toggle hud_pings
+        assert!(s.show_hud_pings);
+        let stored = s.stored();
+        assert_eq!(stored[5], ("hud_pings", "true".to_owned()));
+    }
+
+    #[test]
+    fn test_waypoint_distance() {
+        let wp = Waypoint {
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+            dimension: "minecraft:overworld".into(),
+            name: "Spawn".into(),
+            rgb: 0xFF_FFFF,
+            enabled: true,
+        };
+        let dist = wp.distance_to(3.0, 64.0, 4.0);
+        assert!((dist - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_ping_tick_and_fade() {
+        let mut ping = Ping::new(
+            10.0,
+            64.0,
+            20.0,
+            "minecraft:overworld".into(),
+            "Ping".into(),
+            0xFFAA00,
+            200,
         );
-        s.click(3);
-        s.click(3);
-        assert_eq!(s.stored()[3], ("zoom", "2".to_owned()));
-        let round = s.stored();
-        let back = Settings::read(|k: &str| round.iter().find(|f| f.0 == k).map(|f| f.1.clone()));
-        assert_eq!(back, s);
+        assert_eq!(ping.alpha(), 1.0);
+        ping.remaining_ticks = 100;
+        assert!((ping.alpha() - 0.5).abs() < 1e-4);
+        ping.remaining_ticks = 0;
+        assert_eq!(ping.alpha(), 0.0);
+    }
+
+    #[test]
+    fn test_view_vector() {
+        // Yaw 0 faces south (+Z), Pitch 0 is horizontal
+        let dir = view_vector(0.0, 0.0);
+        assert!((dir[0]).abs() < 1e-6);
+        assert!((dir[1]).abs() < 1e-6);
+        assert!((dir[2] - 1.0).abs() < 1e-6);
+
+        // Yaw 90 faces west (-X)
+        let dir_west = view_vector(90.0, 0.0);
+        assert!((dir_west[0] + 1.0).abs() < 1e-6);
+        assert!((dir_west[1]).abs() < 1e-6);
+        assert!((dir_west[2]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_raycast_target() {
+        let player_pos = [100.0, 70.0, 100.0];
+        let target = raycast_target(player_pos, 0.0, 0.0, 1.62, 10.0);
+        assert!((target[0] - 100.0).abs() < 1e-6);
+        assert!((target[1] - 71.62).abs() < 1e-6);
+        assert!((target[2] - 110.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_project_to_minimap() {
+        // Player at (0, 0), Target at (10, 0) (10 blocks East = +X)
+        // blocks_per_pixel = 1.0, radius = 50.0, not rotated
+        let (rx, ry, clamped) = project_to_minimap(10.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, 50.0);
+        assert_eq!(rx, 10.0);
+        assert_eq!(ry, 0.0);
+        assert!(!clamped);
+
+        // Target at (100, 0) should be clamped to radius 50.0
+        let (rx_clamped, _, is_clamped) =
+            project_to_minimap(100.0, 0.0, 0.0, 0.0, 0.0, false, 1.0, 50.0);
+        assert_eq!(rx_clamped, 50.0);
+        assert!(is_clamped);
+    }
+
+    #[test]
+    fn test_project_in_world_hud() {
+        let target = [0.0, 65.0, 10.0];
+        let player_eye = [0.0, 65.0, 0.0];
+        // Facing South (+Z), pitch 0. Target is straight ahead.
+        let proj = project_in_world_hud(target, player_eye, 0.0, 0.0, 800.0, 600.0, 70.0);
+        assert!(proj.is_some());
+        let [sx, sy] = proj.unwrap();
+        // Should be at screen center (400, 300)
+        assert!((sx - 400.0).abs() < 1e-2);
+        assert!((sy - 300.0).abs() < 1e-2);
+
+        // Target to the West (-X): facing South, West is to the RIGHT (sx > 400)
+        let target_right = [-5.0, 65.0, 10.0];
+        let proj_right =
+            project_in_world_hud(target_right, player_eye, 0.0, 0.0, 800.0, 600.0, 70.0).unwrap();
+        assert!(proj_right[0] > 400.0);
+
+        // Target behind player
+        let target_behind = [0.0, 65.0, -10.0];
+        let proj_behind =
+            project_in_world_hud(target_behind, player_eye, 0.0, 0.0, 800.0, 600.0, 70.0);
+        assert!(proj_behind.is_none());
     }
 }

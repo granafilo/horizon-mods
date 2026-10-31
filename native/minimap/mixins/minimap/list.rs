@@ -5,6 +5,17 @@ fn official_minimap_listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>)
         id: m::ID.into(),
         title: format!("{} {}", m::NAME, m::VERSION),
         description: m::DESCRIPTION.into(),
-        keys: Vec::new(),
+        keys: vec![
+            [
+                m::KEY_PING.into(),
+                "Quick Ping (Raycast)".into(),
+                m::DEFAULT_PING_KEY.into(),
+            ],
+            [
+                m::KEY_WAYPOINT.into(),
+                "Create Waypoint".into(),
+                m::DEFAULT_WAYPOINT_KEY.into(),
+            ],
+        ],
     });
 }
