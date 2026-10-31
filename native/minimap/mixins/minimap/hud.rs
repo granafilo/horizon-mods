@@ -32,6 +32,7 @@ fn minimap_hud(
     let ops = m::draw_hud(
         batch.width,
         batch.height,
+        game.cursor,
         &snapshot,
         &settings,
         |text| game.native_text_width(text),
@@ -45,6 +46,55 @@ fn minimap_hud(
                 rgb,
                 shadow,
             } => game.native_text(batch, &text, at, rgb, shadow),
+            m::HudDrawOp::MenuBackground { rect } => {
+                horizon_client::ui::menu_background(
+                    batch,
+                    &game.gui.atlas,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    true,
+                );
+            }
+            m::HudDrawOp::ListBackground { top, bottom } => {
+                horizon_client::ui::list_background(
+                    batch,
+                    &game.gui.atlas,
+                    top,
+                    bottom,
+                    true,
+                );
+            }
+            m::HudDrawOp::Button {
+                rect,
+                label,
+                active,
+                hover,
+            } => {
+                horizon_client::ui::button(
+                    batch,
+                    &game.gui.atlas,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    &horizon_client::text::Text::literal(&label),
+                    active,
+                    hover,
+                );
+            }
+            m::HudDrawOp::CenteredText { text, y, color } => {
+                horizon_client::ui::centered_text(
+                    batch,
+                    &game.gui.atlas,
+                    &horizon_client::text::Text::literal(&text),
+                    0.0,
+                    y,
+                    batch.width,
+                    color,
+                );
+            }
         }
     }
 }

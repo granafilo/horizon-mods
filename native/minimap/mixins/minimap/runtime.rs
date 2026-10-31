@@ -326,6 +326,8 @@ pub struct WaypointsGuiState {
     pub color_cursor: usize,
     pub name_buffer: String,
     pub scroll_offset: usize,
+    pub screen_width: f32,
+    pub screen_height: f32,
 }
 
 #[derive(Default)]
@@ -780,330 +782,463 @@ pub fn on_gui_key(
     });
 }
 
-pub fn draw_waypoints_gui(
-    screen_width: f32,
-    screen_height: f32,
-    ops: &mut Vec<HudDrawOp>,
-) {
-    STATE.with_borrow(|s| {
+pub fn is_inside(cursor: (f32, f32), rect: [f32; 4]) -> bool {
+    cursor.0 >= rect[0]
+        && cursor.0 < rect[0] + rect[2]
+        && cursor.1 >= rect[1]
+        && cursor.1 < rect[1] + rect[3]
+}
+
+pub fn on_gui_click(
+    cursor_x: f32,
+    cursor_y: f32,
+    player: Option<PlayerSnapshot>,
+) -> bool {
+    let cursor = (cursor_x, cursor_y);
+    let mut close = false;
+
+    STATE.with_borrow_mut(|s| {
         if !s.gui.is_open {
             return;
         }
 
-        let modal_w = 400.0_f32.min(screen_width - 16.0);
-        let modal_h = 220.0_f32.min(screen_height - 16.0);
-        let mx = ((screen_width - modal_w) / 2.0).round();
-        let my = ((screen_height - modal_h) / 2.0).round();
+        let sw = if s.gui.screen_width > 0.0 { s.gui.screen_width } else { 427.0 };
+        let sh = if s.gui.screen_height > 0.0 { s.gui.screen_height } else { 240.0 };
 
-        // Dark dim backdrop
-        ops.push(HudDrawOp::Fill {
-            rect: [0.0, 0.0, screen_width, screen_height],
-            argb: 0x8800_0000,
-        });
-
-        // Main modal container
-        ops.push(HudDrawOp::Fill {
-            rect: [mx, my, modal_w, modal_h],
-            argb: 0xF012_1722,
-        });
-
-        // Frame borders
-        ops.push(HudDrawOp::Fill {
-            rect: [mx, my, modal_w, 1.0],
-            argb: 0xFF33_CCFF,
-        });
-        ops.push(HudDrawOp::Fill {
-            rect: [mx, my + modal_h - 1.0, modal_w, 1.0],
-            argb: 0xFF33_CCFF,
-        });
-        ops.push(HudDrawOp::Fill {
-            rect: [mx, my, 1.0, modal_h],
-            argb: 0xFF33_CCFF,
-        });
-        ops.push(HudDrawOp::Fill {
-            rect: [mx + modal_w - 1.0, my, 1.0, modal_h],
-            argb: 0xFF33_CCFF,
-        });
-
-        // Header bar
-        ops.push(HudDrawOp::Fill {
-            rect: [mx + 1.0, my + 1.0, modal_w - 2.0, 22.0],
-            argb: 0xFF1B_2436,
-        });
-        ops.push(HudDrawOp::Text {
-            text: "WAYPOINTS MANAGER".to_string(),
-            at: [mx + 10.0, my + 6.0],
-            rgb: 0x0033_CCFF,
-            shadow: true,
-        });
-        ops.push(HudDrawOp::Text {
-            text: "[Tab] Switch  [U]/[Esc] Close".to_string(),
-            at: [mx + modal_w - 170.0, my + 6.0],
-            rgb: 0x0099_AABB,
-            shadow: true,
-        });
-
-        // Vertical divider
-        let left_w = 185.0_f32.min(modal_w / 2.0 - 5.0);
-        let div_x = mx + left_w + 10.0;
-        ops.push(HudDrawOp::Fill {
-            rect: [div_x, my + 24.0, 1.0, modal_h - 26.0],
-            argb: 0xFF2A_364F,
-        });
-
-        // Left Pane: Waypoints list
-        ops.push(HudDrawOp::Text {
-            text: format!("LIST ({})", s.waypoints.len()),
-            at: [mx + 10.0, my + 28.0],
-            rgb: 0x00FF_AA00,
-            shadow: true,
-        });
-
-        let max_visible = 6;
-        let start_idx = s.gui.scroll_offset;
-        let end_idx = (start_idx + max_visible).min(s.waypoints.len());
-
-        if s.waypoints.is_empty() {
-            ops.push(HudDrawOp::Text {
-                text: "No waypoints yet.".to_string(),
-                at: [mx + 12.0, my + 60.0],
-                rgb: 0x0088_99AA,
-                shadow: true,
-            });
-            ops.push(HudDrawOp::Text {
-                text: "Press [N] to add one!".to_string(),
-                at: [mx + 12.0, my + 76.0],
-                rgb: 0x0055_FF55,
-                shadow: true,
-            });
-        } else {
-            for i in start_idx..end_idx {
-                let wp = &s.waypoints[i];
-                let item_y = my + 44.0 + ((i - start_idx) as f32) * 22.0;
-
-                // Selection highlight
-                if i == s.gui.selected_index {
-                    let hl_col = if s.gui.active_tab == GuiTab::List {
-                        0x6033_CCFF
-                    } else {
-                        0x3033_CCFF
-                    };
-                    ops.push(HudDrawOp::Fill {
-                        rect: [mx + 8.0, item_y, left_w, 20.0],
-                        argb: hl_col,
-                    });
+        // 1. Color Palette Swatches (y = 30.0)
+        let pal_x = ((sw - 192.0) / 2.0).round();
+        for (idx, _col) in COLOR_PALETTE.iter().enumerate() {
+            let swatch_rect = [pal_x + (idx as f32) * 24.0, 30.0, 20.0, 14.0];
+            if is_inside(cursor, swatch_rect) {
+                if s.gui.selected_index < s.waypoints.len() {
+                    s.waypoints[s.gui.selected_index].rgb = COLOR_PALETTE[idx].1;
+                    s.waypoints_dirty = true;
+                    s.gui.color_cursor = idx;
                 }
+                return;
+            }
+        }
 
-                // Visibility pill
-                let vis_text = if wp.enabled { "[V]" } else { "[H]" };
-                let vis_col = if wp.enabled { 0x0055_FF55 } else { 0x00FF_5555 };
-                ops.push(HudDrawOp::Text {
-                    text: vis_text.to_string(),
-                    at: [mx + 12.0, item_y + 4.0],
-                    rgb: vis_col,
-                    shadow: true,
-                });
+        // 2. Waypoints List Rows
+        let list_top = 48.0;
+        let list_bottom = (sh - 60.0).max(list_top + 40.0);
+        let list_w = 280.0_f32.min(sw - 24.0);
+        let list_x = ((sw - list_w) / 2.0).round();
+        let spacing = 26.0;
+        let max_visible = (((list_bottom - list_top - 6.0) / spacing).floor() as usize).max(1);
 
-                // Color badge
+        for (i, wp) in s.waypoints.iter().enumerate().skip(s.gui.scroll_offset).take(max_visible) {
+            let item_y = list_top + 4.0 + ((i - s.gui.scroll_offset) as f32) * spacing;
+            let item_rect = [list_x, item_y, list_w, 24.0];
+            if is_inside(cursor, item_rect) {
+                s.gui.selected_index = i;
+                s.gui.name_buffer = wp.name.clone();
+                let pure = wp.rgb & 0x00FF_FFFF;
+                s.gui.color_cursor =
+                    COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                return;
+            }
+        }
+
+        let cx = (sw / 2.0).round();
+
+        // Button 1: Toggle Visibility
+        let btn1_rect = [cx - 145.0, sh - 52.0, 92.0, 20.0];
+        if is_inside(cursor, btn1_rect) {
+            if let Some(wp) = s.waypoints.get_mut(s.gui.selected_index) {
+                wp.enabled = !wp.enabled;
+                s.waypoints_dirty = true;
+            }
+            return;
+        }
+
+        // Button 2: Edit Name
+        let btn2_rect = [cx - 46.0, sh - 52.0, 92.0, 20.0];
+        if is_inside(cursor, btn2_rect) {
+            if s.gui.active_tab == GuiTab::EditName {
+                if !s.gui.name_buffer.trim().is_empty() && s.gui.selected_index < s.waypoints.len() {
+                    s.waypoints[s.gui.selected_index].name = s.gui.name_buffer.trim().to_string();
+                    s.waypoints_dirty = true;
+                }
+                s.gui.active_tab = GuiTab::List;
+            } else if !s.waypoints.is_empty() {
+                if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                    s.gui.name_buffer = wp.name.clone();
+                }
+                s.gui.active_tab = GuiTab::EditName;
+            }
+            return;
+        }
+
+        // Button 3: Delete
+        let btn3_rect = [cx + 53.0, sh - 52.0, 92.0, 20.0];
+        if is_inside(cursor, btn3_rect) {
+            if !s.waypoints.is_empty() && s.gui.selected_index < s.waypoints.len() {
+                s.waypoints.remove(s.gui.selected_index);
+                s.waypoints_dirty = true;
+                if s.gui.selected_index >= s.waypoints.len() && !s.waypoints.is_empty() {
+                    s.gui.selected_index = s.waypoints.len() - 1;
+                }
+                if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                    s.gui.name_buffer = wp.name.clone();
+                    let pure = wp.rgb & 0x00FF_FFFF;
+                    s.gui.color_cursor =
+                        COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                } else {
+                    s.gui.name_buffer.clear();
+                    s.gui.color_cursor = 0;
+                }
+            }
+            return;
+        }
+
+        // Button 4: Create Waypoint
+        let btn4_rect = [cx - 145.0, sh - 28.0, 140.0, 20.0];
+        if is_inside(cursor, btn4_rect) {
+            if let Some(p) = player {
+                let new_idx = s.waypoints.len() + 1;
+                let wp = Waypoint {
+                    name: format!("Waypoint #{}", new_idx),
+                    x: p.x,
+                    y: p.y,
+                    z: p.z,
+                    dimension: p.dimension,
+                    rgb: COLOR_PALETTE[0].1,
+                    enabled: true,
+                };
+                s.waypoints.push(wp);
+                s.gui.selected_index = s.waypoints.len() - 1;
+                s.gui.name_buffer = format!("Waypoint #{}", new_idx);
+                s.gui.color_cursor = 0;
+                s.gui.active_tab = GuiTab::EditName;
+                s.waypoints_dirty = true;
+            }
+            return;
+        }
+
+        // Button 5: Done
+        let btn5_rect = [cx + 5.0, sh - 28.0, 140.0, 20.0];
+        if is_inside(cursor, btn5_rect) {
+            if s.gui.active_tab == GuiTab::EditName
+                && !s.gui.name_buffer.trim().is_empty()
+                && s.gui.selected_index < s.waypoints.len()
+            {
+                s.waypoints[s.gui.selected_index].name = s.gui.name_buffer.trim().to_string();
+                s.waypoints_dirty = true;
+            }
+            s.gui.is_open = false;
+            close = true;
+            return;
+        }
+    });
+
+    close
+}
+
+pub fn draw_waypoints_gui(
+    screen_width: f32,
+    screen_height: f32,
+    cursor: (f32, f32),
+    player: &PlayerSnapshot,
+    ops: &mut Vec<HudDrawOp>,
+) {
+    STATE.with_borrow_mut(|s| {
+        if !s.gui.is_open {
+            return;
+        }
+        s.gui.screen_width = screen_width;
+        s.gui.screen_height = screen_height;
+
+        // 1. Menu background (in-world dirt/dark vignette)
+        ops.push(HudDrawOp::MenuBackground {
+            rect: [0.0, 0.0, screen_width, screen_height],
+        });
+
+        // 2. Title: "Waypoints"
+        ops.push(HudDrawOp::CenteredText {
+            text: "Waypoints".to_string(),
+            y: 10.0,
+            color: 0xFFFF_FFFF,
+        });
+
+        // 3. Color palette swatches row (centered at y = 30.0)
+        let pal_x = ((screen_width - 192.0) / 2.0).round();
+        for (idx, (_cname, rgb)) in COLOR_PALETTE.iter().enumerate() {
+            let bx = pal_x + (idx as f32) * 24.0;
+            let by = 30.0;
+            let bw = 20.0;
+            let bh = 14.0;
+            let rect = [bx, by, bw, bh];
+
+            let is_swatch_hover = is_inside(cursor, rect);
+            let is_selected_color = s
+                .waypoints
+                .get(s.gui.selected_index)
+                .is_some_and(|w| (w.rgb & 0x00FF_FFFF) == (*rgb & 0x00FF_FFFF));
+
+            ops.push(HudDrawOp::Fill {
+                rect,
+                argb: 0xFF00_0000 | rgb,
+            });
+            // 1px black inner border
+            ops.push(HudDrawOp::Fill {
+                rect: [bx, by, bw, 1.0],
+                argb: 0xFF00_0000,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [bx, by + bh - 1.0, bw, 1.0],
+                argb: 0xFF00_0000,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [bx, by, 1.0, bh],
+                argb: 0xFF00_0000,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [bx + bw - 1.0, by, 1.0, bh],
+                argb: 0xFF00_0000,
+            });
+
+            if is_selected_color || is_swatch_hover {
+                let border_col = if is_selected_color {
+                    0xFFFF_FFFF
+                } else {
+                    0xFFAA_AAAA
+                };
                 ops.push(HudDrawOp::Fill {
-                    rect: [mx + 34.0, item_y + 5.0, 9.0, 9.0],
-                    argb: 0xFF00_0000 | wp.rgb,
+                    rect: [bx - 1.0, by - 1.0, bw + 2.0, 1.0],
+                    argb: border_col,
                 });
-
-                // Waypoint Name (truncated to 13 chars if needed)
-                let display_name: String = wp.name.chars().take(13).collect();
-                ops.push(HudDrawOp::Text {
-                    text: display_name,
-                    at: [mx + 48.0, item_y + 4.0],
-                    rgb: if i == s.gui.selected_index {
-                        0x00FF_FFFF
-                    } else {
-                        0x00CC_DDEE
-                    },
-                    shadow: true,
+                ops.push(HudDrawOp::Fill {
+                    rect: [bx - 1.0, by + bh, bw + 2.0, 1.0],
+                    argb: border_col,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [bx - 1.0, by - 1.0, 1.0, bh + 2.0],
+                    argb: border_col,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [bx + bw, by - 1.0, 1.0, bh + 2.0],
+                    argb: border_col,
                 });
             }
         }
 
-        // Left pane footer
-        ops.push(HudDrawOp::Text {
-            text: "[N] Add  [D] Del  [V] Vis".to_string(),
-            at: [mx + 10.0, my + modal_h - 18.0],
-            rgb: 0x0088_99AA,
-            shadow: true,
+        // 4. List Container Background
+        let list_top = 48.0;
+        let list_bottom = (screen_height - 60.0).max(list_top + 40.0);
+        ops.push(HudDrawOp::ListBackground {
+            top: list_top,
+            bottom: list_bottom,
         });
 
-        // Right Pane: Editor & Color Grid
-        let right_x = div_x + 10.0;
-        let right_w = modal_w - left_w - 25.0;
+        // 5. Waypoints List Rows
+        let list_w = 280.0_f32.min(screen_width - 24.0);
+        let list_x = ((screen_width - list_w) / 2.0).round();
+        let spacing = 26.0;
+        let max_visible = (((list_bottom - list_top - 6.0) / spacing).floor() as usize).max(1);
 
-        ops.push(HudDrawOp::Text {
-            text: "DETAILS & EDIT".to_string(),
-            at: [right_x, my + 28.0],
-            rgb: 0x00FF_AA00,
-            shadow: true,
-        });
+        if s.waypoints.is_empty() {
+            ops.push(HudDrawOp::CenteredText {
+                text: "No waypoints yet. Click [Create Waypoint] below!".to_string(),
+                y: list_top + 30.0,
+                color: 0xFFAA_AAAA,
+            });
+        } else {
+            for (i, wp) in s
+                .waypoints
+                .iter()
+                .enumerate()
+                .skip(s.gui.scroll_offset)
+                .take(max_visible)
+            {
+                let item_y = list_top + 4.0 + ((i - s.gui.scroll_offset) as f32) * spacing;
+                let item_rect = [list_x, item_y, list_w, 24.0];
+                let is_hover = is_inside(cursor, item_rect);
+                let is_selected = i == s.gui.selected_index;
 
-        if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
-            // 1. Name Input Box
-            ops.push(HudDrawOp::Text {
-                text: "Name: (Press [E] to edit)".to_string(),
-                at: [right_x, my + 44.0],
-                rgb: 0x00BB_CCDD,
-                shadow: true,
-            });
-
-            let box_y = my + 56.0;
-            let is_editing_name = s.gui.active_tab == GuiTab::EditName;
-            let box_bg = if is_editing_name {
-                0x8022_3858
-            } else {
-                0x8018_2030
-            };
-            let box_border = if is_editing_name {
-                0xFF33_CCFF
-            } else {
-                0xFF3A_4760
-            };
-
-            ops.push(HudDrawOp::Fill {
-                rect: [right_x, box_y, right_w, 18.0],
-                argb: box_bg,
-            });
-            ops.push(HudDrawOp::Fill {
-                rect: [right_x, box_y, right_w, 1.0],
-                argb: box_border,
-            });
-            ops.push(HudDrawOp::Fill {
-                rect: [right_x, box_y + 17.0, right_w, 1.0],
-                argb: box_border,
-            });
-            ops.push(HudDrawOp::Fill {
-                rect: [right_x, box_y, 1.0, 18.0],
-                argb: box_border,
-            });
-            ops.push(HudDrawOp::Fill {
-                rect: [right_x + right_w - 1.0, box_y, 1.0, 18.0],
-                argb: box_border,
-            });
-
-            let input_text = if is_editing_name {
-                format!("{}_", s.gui.name_buffer)
-            } else {
-                wp.name.clone()
-            };
-            ops.push(HudDrawOp::Text {
-                text: input_text,
-                at: [right_x + 6.0, box_y + 4.0],
-                rgb: if is_editing_name {
-                    0x0055_FFFF
-                } else {
-                    0x00FF_FFFF
-                },
-                shadow: true,
-            });
-
-            // 2. Position
-            ops.push(HudDrawOp::Text {
-                text: format!("Pos: {:.0}, {:.0}, {:.0}", wp.x, wp.y, wp.z),
-                at: [right_x, my + 80.0],
-                rgb: 0x0099_AABB,
-                shadow: true,
-            });
-
-            // 3. Color Grid
-            ops.push(HudDrawOp::Text {
-                text: "Color Palette: (Press [C] or Grid)".to_string(),
-                at: [right_x, my + 94.0],
-                rgb: 0x00BB_CCDD,
-                shadow: true,
-            });
-
-            let grid_start_x = right_x;
-            let grid_start_y = my + 107.0;
-            let swatch_w = 38.0;
-            let swatch_h = 16.0;
-
-            for (idx, (_cname, rgb)) in COLOR_PALETTE.iter().enumerate() {
-                let row = (idx / 4) as f32;
-                let col = (idx % 4) as f32;
-                let bx = grid_start_x + col * 44.0;
-                let by = grid_start_y + row * 21.0;
+                if is_selected {
+                    // Minecraft list item selected outline
+                    ops.push(HudDrawOp::Fill {
+                        rect: item_rect,
+                        argb: 0x8022_2222,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [list_x, item_y, list_w, 1.0],
+                        argb: 0xFF88_8888,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [list_x, item_y + 23.0, list_w, 1.0],
+                        argb: 0xFF88_8888,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [list_x, item_y, 1.0, 24.0],
+                        argb: 0xFF88_8888,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [list_x + list_w - 1.0, item_y, 1.0, 24.0],
+                        argb: 0xFF88_8888,
+                    });
+                } else if is_hover {
+                    ops.push(HudDrawOp::Fill {
+                        rect: item_rect,
+                        argb: 0x30FF_FFFF,
+                    });
+                }
 
                 // Color swatch
                 ops.push(HudDrawOp::Fill {
-                    rect: [bx, by, swatch_w, swatch_h],
-                    argb: 0xFF00_0000 | rgb,
+                    rect: [list_x + 5.0, item_y + 6.0, 12.0, 12.0],
+                    argb: 0xFF00_0000 | wp.rgb,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [list_x + 5.0, item_y + 6.0, 12.0, 1.0],
+                    argb: 0xFF00_0000,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [list_x + 5.0, item_y + 17.0, 12.0, 1.0],
+                    argb: 0xFF00_0000,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [list_x + 5.0, item_y + 6.0, 1.0, 12.0],
+                    argb: 0xFF00_0000,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [list_x + 16.0, item_y + 6.0, 1.0, 12.0],
+                    argb: 0xFF00_0000,
                 });
 
-                // Active color indicator
-                if (*rgb & 0x00FF_FFFF) == (wp.rgb & 0x00FF_FFFF) {
-                    ops.push(HudDrawOp::Fill {
-                        rect: [
-                            bx + swatch_w / 2.0 - 2.0,
-                            by + swatch_h / 2.0 - 2.0,
-                            4.0,
-                            4.0,
-                        ],
-                        argb: 0xFF00_0000,
-                    });
-                }
+                // Waypoint Name
+                let name_display: String = wp.name.chars().take(16).collect();
+                ops.push(HudDrawOp::Text {
+                    text: name_display,
+                    at: [list_x + 22.0, item_y + 3.0],
+                    rgb: if wp.enabled {
+                        0x00FF_FFFF
+                    } else {
+                        0x0088_8888
+                    },
+                    shadow: true,
+                });
 
-                // Grid cursor highlight
-                if s.gui.active_tab == GuiTab::ColorGrid && idx == s.gui.color_cursor {
-                    // Glowing white border
-                    ops.push(HudDrawOp::Fill {
-                        rect: [bx - 2.0, by - 2.0, swatch_w + 4.0, 2.0],
-                        argb: 0xFFFF_FFFF,
-                    });
-                    ops.push(HudDrawOp::Fill {
-                        rect: [bx - 2.0, by + swatch_h, swatch_w + 4.0, 2.0],
-                        argb: 0xFFFF_FFFF,
-                    });
-                    ops.push(HudDrawOp::Fill {
-                        rect: [bx - 2.0, by - 2.0, 2.0, swatch_h + 4.0],
-                        argb: 0xFFFF_FFFF,
-                    });
-                    ops.push(HudDrawOp::Fill {
-                        rect: [bx + swatch_w, by - 2.0, 2.0, swatch_h + 4.0],
-                        argb: 0xFFFF_FFFF,
-                    });
-                }
+                // Coordinates & Distance
+                let dist = wp.distance_to(player.x, player.y, player.z);
+                let coords_line =
+                    format!("{:.0}, {:.0}, {:.0} ({:.0}m)", wp.x, wp.y, wp.z, dist);
+                ops.push(HudDrawOp::Text {
+                    text: coords_line,
+                    at: [list_x + 22.0, item_y + 13.0],
+                    rgb: 0x00AA_AAAA,
+                    shadow: true,
+                });
+
+                // Status tag
+                let (status_text, status_col) = if wp.enabled {
+                    ("[Vis]", 0x0055_FF55)
+                } else {
+                    ("[Hid]", 0x00FF_5555)
+                };
+                ops.push(HudDrawOp::Text {
+                    text: status_text.to_string(),
+                    at: [list_x + list_w - 38.0, item_y + 8.0],
+                    rgb: status_col,
+                    shadow: true,
+                });
             }
+        }
 
-            // Current / hovered color label
-            let cur_col_idx = if s.gui.active_tab == GuiTab::ColorGrid {
-                s.gui.color_cursor
-            } else {
-                COLOR_PALETTE
-                    .iter()
-                    .position(|(_, c)| *c == (wp.rgb & 0x00FF_FFFF))
-                    .unwrap_or(0)
-            };
-            ops.push(HudDrawOp::Text {
-                text: format!("Color: {}", COLOR_PALETTE[cur_col_idx].0),
-                at: [right_x, my + 154.0],
-                rgb: COLOR_PALETTE[cur_col_idx].1,
-                shadow: true,
+        // 6. Name Edit Box (if editing)
+        let cx = (screen_width / 2.0).round();
+        let sh = screen_height;
+        let is_editing = s.gui.active_tab == GuiTab::EditName;
+
+        if is_editing {
+            let edit_box_rect = [cx - 145.0, sh - 76.0, 290.0, 20.0];
+            ops.push(HudDrawOp::Fill {
+                rect: edit_box_rect,
+                argb: 0xFA00_0000,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [cx - 145.0, sh - 76.0, 290.0, 1.0],
+                argb: 0xFFAA_AAAA,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [cx - 145.0, sh - 57.0, 290.0, 1.0],
+                argb: 0xFFAA_AAAA,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [cx - 145.0, sh - 76.0, 1.0, 20.0],
+                argb: 0xFFAA_AAAA,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [cx + 144.0, sh - 76.0, 1.0, 20.0],
+                argb: 0xFFAA_AAAA,
             });
 
-            // Right pane footer
-            let footer_text = match s.gui.active_tab {
-                GuiTab::EditName => "[Enter] Save Name | [Esc] Cancel",
-                GuiTab::ColorGrid => "[Arrows] Move | [Enter] Select Color",
-                GuiTab::List => "[E] Edit Name | [C] Color Grid",
-            };
-            let footer_col = match s.gui.active_tab {
-                GuiTab::EditName | GuiTab::ColorGrid => 0x0055_FF55,
-                GuiTab::List => 0x0088_99AA,
-            };
+            let input_text = format!("Name: {}_", s.gui.name_buffer);
             ops.push(HudDrawOp::Text {
-                text: footer_text.to_string(),
-                at: [right_x, my + modal_h - 18.0],
-                rgb: footer_col,
+                text: input_text,
+                at: [cx - 140.0, sh - 70.0],
+                rgb: 0x00FF_FFFF,
                 shadow: true,
             });
         }
+
+        // 7. Bottom Minecraft Buttons
+        let has_selection = !s.waypoints.is_empty();
+        let wp_enabled = s
+            .waypoints
+            .get(s.gui.selected_index)
+            .map_or(false, |w| w.enabled);
+
+        // Row 1 Buttons
+        let btn1_rect = [cx - 145.0, sh - 52.0, 92.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn1_rect,
+            label: if wp_enabled {
+                "Vis: ON".into()
+            } else {
+                "Vis: OFF".into()
+            },
+            active: has_selection,
+            hover: has_selection && is_inside(cursor, btn1_rect),
+        });
+
+        let btn2_rect = [cx - 46.0, sh - 52.0, 92.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn2_rect,
+            label: if is_editing {
+                "Save Name".into()
+            } else {
+                "Edit Name".into()
+            },
+            active: has_selection,
+            hover: has_selection && is_inside(cursor, btn2_rect),
+        });
+
+        let btn3_rect = [cx + 53.0, sh - 52.0, 92.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn3_rect,
+            label: "Delete".into(),
+            active: has_selection,
+            hover: has_selection && is_inside(cursor, btn3_rect),
+        });
+
+        // Row 2 Buttons
+        let btn4_rect = [cx - 145.0, sh - 28.0, 140.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn4_rect,
+            label: "Create Waypoint".into(),
+            active: true,
+            hover: is_inside(cursor, btn4_rect),
+        });
+
+        let btn5_rect = [cx + 5.0, sh - 28.0, 140.0, 20.0];
+        ops.push(HudDrawOp::Button {
+            rect: btn5_rect,
+            label: "Done".into(),
+            active: true,
+            hover: is_inside(cursor, btn5_rect),
+        });
     });
 }
 
@@ -1274,10 +1409,14 @@ pub fn minimap_rect(corner_idx: usize, size: f32, screen_width: f32, screen_heig
 }
 
 /// Operations to draw on HUD.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum HudDrawOp {
     Fill { rect: [f32; 4], argb: u32 },
     Text { text: String, at: [f32; 2], rgb: u32, shadow: bool },
+    MenuBackground { rect: [f32; 4] },
+    ListBackground { top: f32, bottom: f32 },
+    Button { rect: [f32; 4], label: String, active: bool, hover: bool },
+    CenteredText { text: String, y: f32, color: u32 },
 }
 
 /// Draw HUD and Minimap markers.
@@ -1285,6 +1424,7 @@ pub enum HudDrawOp {
 pub fn draw_hud(
     screen_width: f32,
     screen_height: f32,
+    cursor: (f32, f32),
     player: &PlayerSnapshot,
     settings: &Settings,
     text_width: impl Fn(&str) -> f32,
@@ -1510,7 +1650,7 @@ pub fn draw_hud(
     }
 
     // Waypoint Manager GUI Modal (rendered on top when open)
-    draw_waypoints_gui(screen_width, screen_height, &mut ops);
+    draw_waypoints_gui(screen_width, screen_height, cursor, player, &mut ops);
 
     ops
 }
@@ -1794,6 +1934,29 @@ mod tests {
 
         // 6. Close GUI (press 'u')
         on_gui_key("key.keyboard.u", true, "key.keyboard.u", None);
+        assert!(!is_gui_open());
+
+        // 7. Test Mouse Click Interactions
+        toggle_gui(None);
+        assert!(is_gui_open());
+        // Set dimensions for layout
+        STATE.with_borrow_mut(|s| {
+            s.gui.screen_width = 800.0;
+            s.gui.screen_height = 600.0;
+        });
+
+        // Click color swatch 2 (Amber) at y = 30.0
+        let pal_x = ((800.0_f32 - 192.0) / 2.0).round();
+        let swatch_amber_x = pal_x + 2.0 * 24.0 + 5.0;
+        let closed = on_gui_click(swatch_amber_x, 35.0, None);
+        assert!(!closed);
+        STATE.with_borrow(|s| {
+            assert_eq!(s.waypoints[0].rgb, COLOR_PALETTE[2].1);
+        });
+
+        // Click Done button: cx + 10.0, sh - 20.0
+        let done_closed = on_gui_click(410.0, 580.0, None);
+        assert!(done_closed);
         assert!(!is_gui_open());
     }
 }

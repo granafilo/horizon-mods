@@ -24,10 +24,27 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     });
 
     if m::is_gui_open() {
-        m::on_gui_key(key, pressed, &waypoints_gui_key, snapshot);
-        if m::take_waypoints_dirty() {
-            let content = m::save_waypoints_content();
-            game.native_set_setting(m::ID, m::KEY_WAYPOINTS, &content);
+        if pressed {
+            if key == "key.keyboard.escape" || key == waypoints_gui_key {
+                m::close_gui();
+                game.screen = crate::game::Screen::Playing;
+                game.pause_menu = true;
+                game.capture(true);
+            } else if key == "key.mouse.left" {
+                let (cx, cy) = game.cursor;
+                let closed = m::on_gui_click(cx, cy, snapshot);
+                if closed {
+                    game.screen = crate::game::Screen::Playing;
+                    game.pause_menu = true;
+                    game.capture(true);
+                }
+            } else {
+                m::on_gui_key(key, true, &waypoints_gui_key, snapshot);
+            }
+            if m::take_waypoints_dirty() {
+                let content = m::save_waypoints_content();
+                game.native_set_setting(m::ID, m::KEY_WAYPOINTS, &content);
+            }
         }
         return;
     }
@@ -35,6 +52,12 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if key == waypoints_gui_key {
         if pressed && playing {
             m::toggle_gui(snapshot);
+            if m::is_gui_open() {
+                game.screen = crate::game::Screen::Paused;
+                game.pause_menu = false;
+                game.capture(false);
+                game.keys.clear();
+            }
         }
         return;
     }
