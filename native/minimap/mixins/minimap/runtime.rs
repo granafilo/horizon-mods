@@ -13,6 +13,8 @@ pub const KEY_PING: &str = "ping";
 pub const DEFAULT_PING_KEY: &str = "key.keyboard.v";
 pub const KEY_WAYPOINT: &str = "waypoint";
 pub const DEFAULT_WAYPOINT_KEY: &str = "key.keyboard.b";
+pub const KEY_WAYPOINTS_GUI: &str = "waypoints_gui";
+pub const DEFAULT_WAYPOINTS_GUI_KEY: &str = "key.keyboard.u";
 
 /// Quick ping lifetime in ticks (20 ticks = 1 sec -> 200 ticks = 10 sec).
 pub const PING_LIFETIME_TICKS: u32 = 200;
@@ -308,6 +310,24 @@ pub struct PlayerSnapshot {
     pub dimension: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GuiTab {
+    #[default]
+    List,
+    EditName,
+    ColorGrid,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WaypointsGuiState {
+    pub is_open: bool,
+    pub selected_index: usize,
+    pub active_tab: GuiTab,
+    pub color_cursor: usize,
+    pub name_buffer: String,
+    pub scroll_offset: usize,
+}
+
 #[derive(Default)]
 pub struct RuntimeState {
     pub settings: Option<Settings>,
@@ -315,6 +335,7 @@ pub struct RuntimeState {
     pub waypoints: Vec<Waypoint>,
     pub waypoints_loaded: bool,
     pub waypoints_dirty: bool,
+    pub gui: WaypointsGuiState,
 }
 
 thread_local! {
@@ -486,6 +507,602 @@ pub fn on_settings_click(button: usize, get: impl Fn(&str) -> Option<String>) {
                     st.waypoints_dirty = true;
                 }
             }
+        }
+    });
+}
+
+pub fn is_gui_open() -> bool {
+    STATE.with_borrow(|s| s.gui.is_open)
+}
+
+pub fn close_gui() {
+    STATE.with_borrow_mut(|s| s.gui.is_open = false);
+}
+
+pub fn toggle_gui(player: Option<PlayerSnapshot>) {
+    let _ = player;
+    STATE.with_borrow_mut(|s| {
+        s.gui.is_open = !s.gui.is_open;
+        if s.gui.is_open {
+            if s.waypoints.is_empty() {
+                s.gui.selected_index = 0;
+                s.gui.name_buffer.clear();
+                s.gui.color_cursor = 0;
+                s.gui.active_tab = GuiTab::List;
+            } else {
+                if s.gui.selected_index >= s.waypoints.len() {
+                    s.gui.selected_index = 0;
+                }
+                let wp = &s.waypoints[s.gui.selected_index];
+                s.gui.name_buffer = wp.name.clone();
+                let pure = wp.rgb & 0x00FF_FFFF;
+                s.gui.color_cursor =
+                    COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                s.gui.active_tab = GuiTab::List;
+            }
+        }
+    });
+}
+
+pub fn key_to_char(key: &str, current_text: &str) -> Option<char> {
+    if let Some(suffix) = key.strip_prefix("key.keyboard.") {
+        if suffix.len() == 1 {
+            let c = suffix.chars().next().unwrap();
+            if c.is_ascii_alphabetic() {
+                let start_word = current_text.is_empty() || current_text.ends_with(' ');
+                return Some(if start_word {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                });
+            }
+            if c.is_ascii_digit() {
+                return Some(c);
+            }
+        }
+        match suffix {
+            "space" => Some(' '),
+            "minus" => Some('-'),
+            "period" => Some('.'),
+            "slash" => Some('/'),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+pub fn on_gui_key(
+    key: &str,
+    pressed: bool,
+    waypoints_gui_key: &str,
+    player: Option<PlayerSnapshot>,
+) {
+    if !pressed {
+        return;
+    }
+
+    STATE.with_borrow_mut(|s| {
+        if !s.gui.is_open {
+            return;
+        }
+
+        // Closing with Escape or Menu key
+        if key == "key.keyboard.escape" || key == waypoints_gui_key {
+            if s.gui.active_tab != GuiTab::List {
+                // If editing or in color grid, first Escape cancels and returns to List
+                if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                    s.gui.name_buffer = wp.name.clone();
+                    let pure = wp.rgb & 0x00FF_FFFF;
+                    s.gui.color_cursor =
+                        COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                }
+                s.gui.active_tab = GuiTab::List;
+            } else {
+                s.gui.is_open = false;
+            }
+            return;
+        }
+
+        // Tab switches between panes/modes
+        if key == "key.keyboard.tab" {
+            if s.waypoints.is_empty() {
+                return;
+            }
+            s.gui.active_tab = match s.gui.active_tab {
+                GuiTab::List => GuiTab::EditName,
+                GuiTab::EditName => {
+                    // Commit name before moving to color grid
+                    if !s.gui.name_buffer.trim().is_empty()
+                        && s.gui.selected_index < s.waypoints.len()
+                    {
+                        s.waypoints[s.gui.selected_index].name =
+                            s.gui.name_buffer.trim().to_string();
+                        s.waypoints_dirty = true;
+                    }
+                    GuiTab::ColorGrid
+                }
+                GuiTab::ColorGrid => GuiTab::List,
+            };
+            return;
+        }
+
+        match s.gui.active_tab {
+            GuiTab::EditName => {
+                if key == "key.keyboard.enter" {
+                    if !s.gui.name_buffer.trim().is_empty()
+                        && s.gui.selected_index < s.waypoints.len()
+                    {
+                        s.waypoints[s.gui.selected_index].name =
+                            s.gui.name_buffer.trim().to_string();
+                        s.waypoints_dirty = true;
+                    }
+                    s.gui.active_tab = GuiTab::List;
+                } else if key == "key.keyboard.backspace" {
+                    s.gui.name_buffer.pop();
+                } else if let Some(c) = key_to_char(key, &s.gui.name_buffer) {
+                    if s.gui.name_buffer.len() < 24 {
+                        s.gui.name_buffer.push(c);
+                    }
+                }
+            }
+            GuiTab::ColorGrid => {
+                let grid_cols = 4;
+                match key {
+                    "key.keyboard.left" => {
+                        if s.gui.color_cursor % grid_cols > 0 {
+                            s.gui.color_cursor -= 1;
+                        }
+                    }
+                    "key.keyboard.right" => {
+                        if s.gui.color_cursor % grid_cols < grid_cols - 1
+                            && s.gui.color_cursor + 1 < COLOR_PALETTE.len()
+                        {
+                            s.gui.color_cursor += 1;
+                        }
+                    }
+                    "key.keyboard.up" => {
+                        if s.gui.color_cursor >= grid_cols {
+                            s.gui.color_cursor -= grid_cols;
+                        }
+                    }
+                    "key.keyboard.down" => {
+                        if s.gui.color_cursor + grid_cols < COLOR_PALETTE.len() {
+                            s.gui.color_cursor += grid_cols;
+                        }
+                    }
+                    "key.keyboard.enter" | "key.keyboard.space" => {
+                        if s.gui.selected_index < s.waypoints.len() {
+                            s.waypoints[s.gui.selected_index].rgb =
+                                COLOR_PALETTE[s.gui.color_cursor].1;
+                            s.waypoints_dirty = true;
+                        }
+                        s.gui.active_tab = GuiTab::List;
+                    }
+                    _ => {}
+                }
+            }
+            GuiTab::List => match key {
+                "key.keyboard.up" | "key.keyboard.w" => {
+                    if s.gui.selected_index > 0 {
+                        s.gui.selected_index -= 1;
+                    }
+                    if s.gui.selected_index < s.gui.scroll_offset {
+                        s.gui.scroll_offset = s.gui.selected_index;
+                    }
+                    if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                        s.gui.name_buffer = wp.name.clone();
+                        let pure = wp.rgb & 0x00FF_FFFF;
+                        s.gui.color_cursor =
+                            COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                    }
+                }
+                "key.keyboard.down" | "key.keyboard.s" => {
+                    if !s.waypoints.is_empty() && s.gui.selected_index + 1 < s.waypoints.len() {
+                        s.gui.selected_index += 1;
+                    }
+                    let max_visible = 6;
+                    if s.gui.selected_index >= s.gui.scroll_offset + max_visible {
+                        s.gui.scroll_offset = s.gui.selected_index + 1 - max_visible;
+                    }
+                    if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                        s.gui.name_buffer = wp.name.clone();
+                        let pure = wp.rgb & 0x00FF_FFFF;
+                        s.gui.color_cursor =
+                            COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                    }
+                }
+                "key.keyboard.v" => {
+                    if let Some(wp) = s.waypoints.get_mut(s.gui.selected_index) {
+                        wp.enabled = !wp.enabled;
+                        s.waypoints_dirty = true;
+                    }
+                }
+                "key.keyboard.d" | "key.keyboard.delete" => {
+                    if !s.waypoints.is_empty() && s.gui.selected_index < s.waypoints.len() {
+                        s.waypoints.remove(s.gui.selected_index);
+                        s.waypoints_dirty = true;
+                        if s.gui.selected_index >= s.waypoints.len() && !s.waypoints.is_empty() {
+                            s.gui.selected_index = s.waypoints.len() - 1;
+                        }
+                        if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                            s.gui.name_buffer = wp.name.clone();
+                            let pure = wp.rgb & 0x00FF_FFFF;
+                            s.gui.color_cursor =
+                                COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                        } else {
+                            s.gui.name_buffer.clear();
+                            s.gui.color_cursor = 0;
+                        }
+                    }
+                }
+                "key.keyboard.e" | "key.keyboard.enter" => {
+                    if !s.waypoints.is_empty() {
+                        if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                            s.gui.name_buffer = wp.name.clone();
+                        }
+                        s.gui.active_tab = GuiTab::EditName;
+                    }
+                }
+                "key.keyboard.c" => {
+                    if !s.waypoints.is_empty() {
+                        if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+                            let pure = wp.rgb & 0x00FF_FFFF;
+                            s.gui.color_cursor =
+                                COLOR_PALETTE.iter().position(|(_, c)| *c == pure).unwrap_or(0);
+                        }
+                        s.gui.active_tab = GuiTab::ColorGrid;
+                    }
+                }
+                "key.keyboard.n" => {
+                    if let Some(p) = player {
+                        let new_idx = s.waypoints.len() + 1;
+                        let wp = Waypoint {
+                            name: format!("Waypoint #{}", new_idx),
+                            x: p.x,
+                            y: p.y,
+                            z: p.z,
+                            dimension: p.dimension,
+                            rgb: COLOR_PALETTE[0].1,
+                            enabled: true,
+                        };
+                        s.waypoints.push(wp);
+                        s.gui.selected_index = s.waypoints.len() - 1;
+                        s.gui.name_buffer = format!("Waypoint #{}", new_idx);
+                        s.gui.color_cursor = 0;
+                        s.gui.active_tab = GuiTab::EditName;
+                        s.waypoints_dirty = true;
+                    }
+                }
+                _ => {}
+            },
+        }
+    });
+}
+
+pub fn draw_waypoints_gui(
+    screen_width: f32,
+    screen_height: f32,
+    ops: &mut Vec<HudDrawOp>,
+) {
+    STATE.with_borrow(|s| {
+        if !s.gui.is_open {
+            return;
+        }
+
+        let modal_w = 400.0_f32.min(screen_width - 16.0);
+        let modal_h = 220.0_f32.min(screen_height - 16.0);
+        let mx = ((screen_width - modal_w) / 2.0).round();
+        let my = ((screen_height - modal_h) / 2.0).round();
+
+        // Dark dim backdrop
+        ops.push(HudDrawOp::Fill {
+            rect: [0.0, 0.0, screen_width, screen_height],
+            argb: 0x8800_0000,
+        });
+
+        // Main modal container
+        ops.push(HudDrawOp::Fill {
+            rect: [mx, my, modal_w, modal_h],
+            argb: 0xF012_1722,
+        });
+
+        // Frame borders
+        ops.push(HudDrawOp::Fill {
+            rect: [mx, my, modal_w, 1.0],
+            argb: 0xFF33_CCFF,
+        });
+        ops.push(HudDrawOp::Fill {
+            rect: [mx, my + modal_h - 1.0, modal_w, 1.0],
+            argb: 0xFF33_CCFF,
+        });
+        ops.push(HudDrawOp::Fill {
+            rect: [mx, my, 1.0, modal_h],
+            argb: 0xFF33_CCFF,
+        });
+        ops.push(HudDrawOp::Fill {
+            rect: [mx + modal_w - 1.0, my, 1.0, modal_h],
+            argb: 0xFF33_CCFF,
+        });
+
+        // Header bar
+        ops.push(HudDrawOp::Fill {
+            rect: [mx + 1.0, my + 1.0, modal_w - 2.0, 22.0],
+            argb: 0xFF1B_2436,
+        });
+        ops.push(HudDrawOp::Text {
+            text: "WAYPOINTS MANAGER".to_string(),
+            at: [mx + 10.0, my + 6.0],
+            rgb: 0x0033_CCFF,
+            shadow: true,
+        });
+        ops.push(HudDrawOp::Text {
+            text: "[Tab] Switch  [U]/[Esc] Close".to_string(),
+            at: [mx + modal_w - 170.0, my + 6.0],
+            rgb: 0x0099_AABB,
+            shadow: true,
+        });
+
+        // Vertical divider
+        let left_w = 185.0_f32.min(modal_w / 2.0 - 5.0);
+        let div_x = mx + left_w + 10.0;
+        ops.push(HudDrawOp::Fill {
+            rect: [div_x, my + 24.0, 1.0, modal_h - 26.0],
+            argb: 0xFF2A_364F,
+        });
+
+        // Left Pane: Waypoints list
+        ops.push(HudDrawOp::Text {
+            text: format!("LIST ({})", s.waypoints.len()),
+            at: [mx + 10.0, my + 28.0],
+            rgb: 0x00FF_AA00,
+            shadow: true,
+        });
+
+        let max_visible = 6;
+        let start_idx = s.gui.scroll_offset;
+        let end_idx = (start_idx + max_visible).min(s.waypoints.len());
+
+        if s.waypoints.is_empty() {
+            ops.push(HudDrawOp::Text {
+                text: "No waypoints yet.".to_string(),
+                at: [mx + 12.0, my + 60.0],
+                rgb: 0x0088_99AA,
+                shadow: true,
+            });
+            ops.push(HudDrawOp::Text {
+                text: "Press [N] to add one!".to_string(),
+                at: [mx + 12.0, my + 76.0],
+                rgb: 0x0055_FF55,
+                shadow: true,
+            });
+        } else {
+            for i in start_idx..end_idx {
+                let wp = &s.waypoints[i];
+                let item_y = my + 44.0 + ((i - start_idx) as f32) * 22.0;
+
+                // Selection highlight
+                if i == s.gui.selected_index {
+                    let hl_col = if s.gui.active_tab == GuiTab::List {
+                        0x6033_CCFF
+                    } else {
+                        0x3033_CCFF
+                    };
+                    ops.push(HudDrawOp::Fill {
+                        rect: [mx + 8.0, item_y, left_w, 20.0],
+                        argb: hl_col,
+                    });
+                }
+
+                // Visibility pill
+                let vis_text = if wp.enabled { "[V]" } else { "[H]" };
+                let vis_col = if wp.enabled { 0x0055_FF55 } else { 0x00FF_5555 };
+                ops.push(HudDrawOp::Text {
+                    text: vis_text.to_string(),
+                    at: [mx + 12.0, item_y + 4.0],
+                    rgb: vis_col,
+                    shadow: true,
+                });
+
+                // Color badge
+                ops.push(HudDrawOp::Fill {
+                    rect: [mx + 34.0, item_y + 5.0, 9.0, 9.0],
+                    argb: 0xFF00_0000 | wp.rgb,
+                });
+
+                // Waypoint Name (truncated to 13 chars if needed)
+                let display_name: String = wp.name.chars().take(13).collect();
+                ops.push(HudDrawOp::Text {
+                    text: display_name,
+                    at: [mx + 48.0, item_y + 4.0],
+                    rgb: if i == s.gui.selected_index {
+                        0x00FF_FFFF
+                    } else {
+                        0x00CC_DDEE
+                    },
+                    shadow: true,
+                });
+            }
+        }
+
+        // Left pane footer
+        ops.push(HudDrawOp::Text {
+            text: "[N] Add  [D] Del  [V] Vis".to_string(),
+            at: [mx + 10.0, my + modal_h - 18.0],
+            rgb: 0x0088_99AA,
+            shadow: true,
+        });
+
+        // Right Pane: Editor & Color Grid
+        let right_x = div_x + 10.0;
+        let right_w = modal_w - left_w - 25.0;
+
+        ops.push(HudDrawOp::Text {
+            text: "DETAILS & EDIT".to_string(),
+            at: [right_x, my + 28.0],
+            rgb: 0x00FF_AA00,
+            shadow: true,
+        });
+
+        if let Some(wp) = s.waypoints.get(s.gui.selected_index) {
+            // 1. Name Input Box
+            ops.push(HudDrawOp::Text {
+                text: "Name: (Press [E] to edit)".to_string(),
+                at: [right_x, my + 44.0],
+                rgb: 0x00BB_CCDD,
+                shadow: true,
+            });
+
+            let box_y = my + 56.0;
+            let is_editing_name = s.gui.active_tab == GuiTab::EditName;
+            let box_bg = if is_editing_name {
+                0x8022_3858
+            } else {
+                0x8018_2030
+            };
+            let box_border = if is_editing_name {
+                0xFF33_CCFF
+            } else {
+                0xFF3A_4760
+            };
+
+            ops.push(HudDrawOp::Fill {
+                rect: [right_x, box_y, right_w, 18.0],
+                argb: box_bg,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [right_x, box_y, right_w, 1.0],
+                argb: box_border,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [right_x, box_y + 17.0, right_w, 1.0],
+                argb: box_border,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [right_x, box_y, 1.0, 18.0],
+                argb: box_border,
+            });
+            ops.push(HudDrawOp::Fill {
+                rect: [right_x + right_w - 1.0, box_y, 1.0, 18.0],
+                argb: box_border,
+            });
+
+            let input_text = if is_editing_name {
+                format!("{}_", s.gui.name_buffer)
+            } else {
+                wp.name.clone()
+            };
+            ops.push(HudDrawOp::Text {
+                text: input_text,
+                at: [right_x + 6.0, box_y + 4.0],
+                rgb: if is_editing_name {
+                    0x0055_FFFF
+                } else {
+                    0x00FF_FFFF
+                },
+                shadow: true,
+            });
+
+            // 2. Position
+            ops.push(HudDrawOp::Text {
+                text: format!("Pos: {:.0}, {:.0}, {:.0}", wp.x, wp.y, wp.z),
+                at: [right_x, my + 80.0],
+                rgb: 0x0099_AABB,
+                shadow: true,
+            });
+
+            // 3. Color Grid
+            ops.push(HudDrawOp::Text {
+                text: "Color Palette: (Press [C] or Grid)".to_string(),
+                at: [right_x, my + 94.0],
+                rgb: 0x00BB_CCDD,
+                shadow: true,
+            });
+
+            let grid_start_x = right_x;
+            let grid_start_y = my + 107.0;
+            let swatch_w = 38.0;
+            let swatch_h = 16.0;
+
+            for (idx, (_cname, rgb)) in COLOR_PALETTE.iter().enumerate() {
+                let row = (idx / 4) as f32;
+                let col = (idx % 4) as f32;
+                let bx = grid_start_x + col * 44.0;
+                let by = grid_start_y + row * 21.0;
+
+                // Color swatch
+                ops.push(HudDrawOp::Fill {
+                    rect: [bx, by, swatch_w, swatch_h],
+                    argb: 0xFF00_0000 | rgb,
+                });
+
+                // Active color indicator
+                if (*rgb & 0x00FF_FFFF) == (wp.rgb & 0x00FF_FFFF) {
+                    ops.push(HudDrawOp::Fill {
+                        rect: [
+                            bx + swatch_w / 2.0 - 2.0,
+                            by + swatch_h / 2.0 - 2.0,
+                            4.0,
+                            4.0,
+                        ],
+                        argb: 0xFF00_0000,
+                    });
+                }
+
+                // Grid cursor highlight
+                if s.gui.active_tab == GuiTab::ColorGrid && idx == s.gui.color_cursor {
+                    // Glowing white border
+                    ops.push(HudDrawOp::Fill {
+                        rect: [bx - 2.0, by - 2.0, swatch_w + 4.0, 2.0],
+                        argb: 0xFFFF_FFFF,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [bx - 2.0, by + swatch_h, swatch_w + 4.0, 2.0],
+                        argb: 0xFFFF_FFFF,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [bx - 2.0, by - 2.0, 2.0, swatch_h + 4.0],
+                        argb: 0xFFFF_FFFF,
+                    });
+                    ops.push(HudDrawOp::Fill {
+                        rect: [bx + swatch_w, by - 2.0, 2.0, swatch_h + 4.0],
+                        argb: 0xFFFF_FFFF,
+                    });
+                }
+            }
+
+            // Current / hovered color label
+            let cur_col_idx = if s.gui.active_tab == GuiTab::ColorGrid {
+                s.gui.color_cursor
+            } else {
+                COLOR_PALETTE
+                    .iter()
+                    .position(|(_, c)| *c == (wp.rgb & 0x00FF_FFFF))
+                    .unwrap_or(0)
+            };
+            ops.push(HudDrawOp::Text {
+                text: format!("Color: {}", COLOR_PALETTE[cur_col_idx].0),
+                at: [right_x, my + 154.0],
+                rgb: COLOR_PALETTE[cur_col_idx].1,
+                shadow: true,
+            });
+
+            // Right pane footer
+            let footer_text = match s.gui.active_tab {
+                GuiTab::EditName => "[Enter] Save Name | [Esc] Cancel",
+                GuiTab::ColorGrid => "[Arrows] Move | [Enter] Select Color",
+                GuiTab::List => "[E] Edit Name | [C] Color Grid",
+            };
+            let footer_col = match s.gui.active_tab {
+                GuiTab::EditName | GuiTab::ColorGrid => 0x0055_FF55,
+                GuiTab::List => 0x0088_99AA,
+            };
+            ops.push(HudDrawOp::Text {
+                text: footer_text.to_string(),
+                at: [right_x, my + modal_h - 18.0],
+                rgb: footer_col,
+                shadow: true,
+            });
         }
     });
 }
@@ -892,6 +1509,9 @@ pub fn draw_hud(
         });
     }
 
+    // Waypoint Manager GUI Modal (rendered on top when open)
+    draw_waypoints_gui(screen_width, screen_height, &mut ops);
+
     ops
 }
 
@@ -1104,5 +1724,76 @@ mod tests {
         STATE.with_borrow(|s| {
             assert!(s.waypoints.is_empty());
         });
+    }
+
+    #[test]
+    fn test_in_game_waypoints_gui() {
+        // Initialize state
+        STATE.with_borrow_mut(|s| {
+            s.waypoints = vec![Waypoint {
+                name: "Home".to_string(),
+                x: 100.0,
+                y: 64.0,
+                z: -200.0,
+                dimension: "minecraft:overworld".to_string(),
+                rgb: 0x0033_CCFF, // Cyan
+                enabled: true,
+            }];
+            s.gui.is_open = false;
+        });
+
+        // 1. Toggle GUI open
+        assert!(!is_gui_open());
+        toggle_gui(None);
+        assert!(is_gui_open());
+        STATE.with_borrow(|s| {
+            assert_eq!(s.gui.selected_index, 0);
+            assert_eq!(s.gui.name_buffer, "Home");
+            assert_eq!(s.gui.active_tab, GuiTab::List);
+        });
+
+        // 2. Switch tab to EditName (press 'e')
+        on_gui_key("key.keyboard.e", true, "key.keyboard.u", None);
+        STATE.with_borrow(|s| {
+            assert_eq!(s.gui.active_tab, GuiTab::EditName);
+        });
+
+        // 3. Edit name: backspace, type '2', enter
+        on_gui_key("key.keyboard.space", true, "key.keyboard.u", None);
+        on_gui_key("key.keyboard.2", true, "key.keyboard.u", None);
+        on_gui_key("key.keyboard.enter", true, "key.keyboard.u", None);
+        STATE.with_borrow(|s| {
+            assert_eq!(s.gui.active_tab, GuiTab::List);
+            assert_eq!(s.waypoints[0].name, "Home 2");
+            assert!(s.waypoints_dirty);
+        });
+
+        // 4. Color grid (press 'c')
+        on_gui_key("key.keyboard.c", true, "key.keyboard.u", None);
+        STATE.with_borrow(|s| {
+            assert_eq!(s.gui.active_tab, GuiTab::ColorGrid);
+            assert_eq!(s.gui.color_cursor, 0); // Cyan
+        });
+
+        // Move right in grid (Lime) and pick
+        on_gui_key("key.keyboard.right", true, "key.keyboard.u", None);
+        STATE.with_borrow(|s| {
+            assert_eq!(s.gui.color_cursor, 1); // Lime
+        });
+        on_gui_key("key.keyboard.enter", true, "key.keyboard.u", None);
+        STATE.with_borrow(|s| {
+            assert_eq!(s.gui.active_tab, GuiTab::List);
+            assert_eq!(s.waypoints[0].rgb, COLOR_PALETTE[1].1);
+        });
+
+        // 5. Toggle visibility (press 'v')
+        on_gui_key("key.keyboard.v", true, "key.keyboard.u", None);
+        STATE.with_borrow(|s| {
+            assert!(!s.waypoints[0].enabled);
+        });
+
+        // 6. Close GUI (press 'u')
+        on_gui_key("key.keyboard.u", true, "key.keyboard.u", None);
+        assert!(!is_gui_open());
     }
 }

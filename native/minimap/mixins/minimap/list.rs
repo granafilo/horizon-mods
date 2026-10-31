@@ -16,6 +16,11 @@ fn official_minimap_listed(mods: &mut Vec<crate::game::native_hooks::NativeMod>)
                 "Create Waypoint".into(),
                 m::DEFAULT_WAYPOINT_KEY.into(),
             ],
+            [
+                m::KEY_WAYPOINTS_GUI.into(),
+                "Waypoints Menu".into(),
+                m::DEFAULT_WAYPOINTS_GUI_KEY.into(),
+            ],
         ],
     });
 }
