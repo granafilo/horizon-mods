@@ -67,6 +67,17 @@ bindings = [
 ]
 
 [[injection]]
+id = "hud_layers"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::Game<'_>::hud_layers"
+helper = "hud_layers.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "size", ty = "[u32; 2]", value = "size" },
+]
+
+[[injection]]
 id = "hud"
 kind = "HEAD"
 target = "horizon_client::game::native_hooks::Game<'_>::native_hud"

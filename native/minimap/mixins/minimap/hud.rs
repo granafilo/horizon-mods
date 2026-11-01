@@ -14,42 +14,7 @@ fn minimap_hud(
     };
 
     if m::is_gui_open() || m::is_world_map_open() {
-        batch.vertices.clear();
-        batch.blends.clear();
-        batch.patches.clear();
-
-        game.attack_clicks = 0;
-        game.keys.clear();
-        if let Some((y, p)) = m::get_frozen_look() {
-            game.yaw = y;
-            game.pitch = p;
-        }
-
-        game.captured = true;
-        if let Some(w) = &game.window {
-            w.set_cursor_visible(true);
-            let _ = w.set_cursor_grab(winit::window::CursorGrabMode::None);
-        }
-
-        if m::is_world_map_open() {
-            m::update_world_map_drag(game.cursor);
-            if let Some(quads) = m::take_world_map_quadrants_to_upload(&player.dimension) {
-                let (w, h) = (game.gui.atlas.width as f32, game.gui.atlas.height as f32);
-                let slots = [250usize, 251, 252, 253];
-                for (idx, &slot) in slots.iter().enumerate() {
-                    let name = format!("horizon/map{slot}");
-                    if let Some(rect) = game.gui.atlas.sprites.get(&name).copied() {
-                        game.map_patches.push(horizon_client::font::Patch {
-                            x: (rect.u0 * w).round() as u32,
-                            y: (rect.v0 * h).round() as u32,
-                            width: 128,
-                            height: 128,
-                            rgba: quads[idx].clone(),
-                        });
-                    }
-                }
-            }
-        }
+        return;
     }
 
     let settings = m::settings(|key| game.native_setting(m::ID, key));

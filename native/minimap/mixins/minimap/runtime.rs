@@ -544,10 +544,25 @@ pub struct RuntimeState {
     pub explored_loaded: bool,
     pub map_texture_cache: Option<(i32, i32, usize, u64)>,
     pub map_quadrants: Option<[Vec<u8>; 4]>,
+    pub consume_escape: bool,
 }
 
 thread_local! {
     static STATE: RefCell<RuntimeState> = RefCell::new(RuntimeState::default());
+}
+
+pub fn request_consume_escape() {
+    STATE.with_borrow_mut(|s| {
+        s.consume_escape = true;
+    });
+}
+
+pub fn take_consume_escape() -> bool {
+    STATE.with_borrow_mut(|s| {
+        let val = s.consume_escape;
+        s.consume_escape = false;
+        val
+    })
 }
 
 /// Loads waypoints from storage via reader if not already loaded.
@@ -923,12 +938,12 @@ pub fn update_world_map_drag(cursor: (f32, f32)) {
         let sh = if s.world_map.screen_height > 0.0 { s.world_map.screen_height } else { 240.0 };
         let map_size = (sw - 24.0).min(sh - 62.0).min(512.0);
         let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
-        let scale = map_size / 128.0;
+        let pixels_per_block = map_size / (256.0 * bpp);
 
         let dx_screen = cursor.0 - s.world_map.drag_start_cursor.0;
         let dy_screen = cursor.1 - s.world_map.drag_start_cursor.1;
-        let world_dx = -(f64::from(dx_screen / scale * bpp));
-        let world_dz = -(f64::from(dy_screen / scale * bpp));
+        let world_dx = -(f64::from(dx_screen / pixels_per_block));
+        let world_dz = -(f64::from(dy_screen / pixels_per_block));
 
         s.world_map.pan_x = s.world_map.drag_start_pan.0 + world_dx;
         s.world_map.pan_z = s.world_map.drag_start_pan.1 + world_dz;
@@ -2250,14 +2265,12 @@ pub fn draw_world_map(
         let map_cx = map_x + map_size / 2.0;
         let map_cy = map_y + map_size / 2.0;
         let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
-        let scale = map_size / 128.0;
+        let pixels_per_block = map_size / (256.0 * bpp);
 
         // Cursor coordinates in world blocks (if hovering map)
         if is_inside(cursor, map_rect) {
-            let norm_x = (cursor.0 - map_cx) / scale;
-            let norm_z = (cursor.1 - map_cy) / scale;
-            let cur_wx = (s.world_map.pan_x + f64::from(norm_x * bpp)).round() as i32;
-            let cur_wz = (s.world_map.pan_z + f64::from(norm_z * bpp)).round() as i32;
+            let cur_wx = (s.world_map.pan_x + f64::from((cursor.0 - map_cx) / pixels_per_block)).round() as i32;
+            let cur_wz = (s.world_map.pan_z + f64::from((cursor.1 - map_cy) / pixels_per_block)).round() as i32;
             ops.push(HudDrawOp::Text {
                 text: format!("Cursor: [{}, {}]", cur_wx, cur_wz),
                 at: [80.0, 9.0],
@@ -2311,8 +2324,8 @@ pub fn draw_world_map(
             }
             let dx = wp.x - s.world_map.pan_x;
             let dz = wp.z - s.world_map.pan_z;
-            let wx_screen = map_cx + (dx as f32 / bpp) * scale;
-            let wz_screen = map_cy + (dz as f32 / bpp) * scale;
+            let wx_screen = map_cx + (dx as f32) * pixels_per_block;
+            let wz_screen = map_cy + (dz as f32) * pixels_per_block;
 
             if is_inside((wx_screen, wz_screen), map_rect) {
                 // Waypoint marker square with border
@@ -2338,11 +2351,36 @@ pub fn draw_world_map(
             }
         }
 
+        // 6b. Active Pings
+        for ping in &s.pings {
+            if ping.waypoint.dimension != player.dimension {
+                continue;
+            }
+            let ping_dx = ping.waypoint.x - s.world_map.pan_x;
+            let ping_dz = ping.waypoint.z - s.world_map.pan_z;
+            let ping_sx = map_cx + (ping_dx as f32) * pixels_per_block;
+            let ping_sy = map_cy + (ping_dz as f32) * pixels_per_block;
+            if is_inside((ping_sx, ping_sy), map_rect) {
+                ops.push(HudDrawOp::Fill {
+                    rect: [ping_sx - 3.0, ping_sy - 3.0, 7.0, 7.0],
+                    argb: 0xFF00_0000,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [ping_sx - 2.0, ping_sy - 2.0, 5.0, 5.0],
+                    argb: 0xFFFF_3333,
+                });
+                ops.push(HudDrawOp::Fill {
+                    rect: [ping_sx, ping_sy, 1.0, 1.0],
+                    argb: 0xFFFF_FFFF,
+                });
+            }
+        }
+
         // 7. Player Marker
         let p_dx = player.x - s.world_map.pan_x;
         let p_dz = player.z - s.world_map.pan_z;
-        let p_sx = map_cx + (p_dx as f32 / bpp) * scale;
-        let p_sy = map_cy + (p_dz as f32 / bpp) * scale;
+        let p_sx = map_cx + (p_dx as f32) * pixels_per_block;
+        let p_sy = map_cy + (p_dz as f32) * pixels_per_block;
 
         if is_inside((p_sx, p_sy), map_rect) {
             ops.push(HudDrawOp::PlayerMarker {
@@ -3137,5 +3175,33 @@ mod tests {
         let quads = compose_world_map_quadrants(dim, 0.0, 0.0, 1.0, &loaded);
         assert_eq!(quads.len(), 4);
         assert_eq!(quads[0].len(), 128 * 128 * 4);
+    }
+
+    #[test]
+    fn test_consume_escape_and_1_to_1_drag_scale() {
+        assert!(!take_consume_escape());
+        request_consume_escape();
+        assert!(take_consume_escape());
+        assert!(!take_consume_escape());
+
+        STATE.with_borrow_mut(|s| {
+            s.world_map.screen_width = 800.0;
+            s.world_map.screen_height = 600.0;
+            s.world_map.zoom_index = 1; // bpp = 1.0
+            s.world_map.pan_x = 500.0;
+            s.world_map.pan_z = -1200.0;
+        });
+
+        // Map size = (800-24).min(600-62).min(512) = 512.0
+        // pixels_per_block = 512.0 / (256.0 * 1.0) = 2.0 px/block
+        start_world_map_drag((400.0, 300.0));
+        update_world_map_drag((420.0, 310.0));
+        end_world_map_drag();
+
+        // Moving mouse +20px X, +10px Y should move pan by -10 blocks X, -5 blocks Z
+        STATE.with_borrow(|s| {
+            assert_eq!(s.world_map.pan_x, 490.0);
+            assert_eq!(s.world_map.pan_z, -1205.0);
+        });
     }
 }

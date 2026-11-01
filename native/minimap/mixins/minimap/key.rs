@@ -28,6 +28,9 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if m::is_world_map_open() {
         if pressed {
             if key == "key.keyboard.escape" || key == world_map_key {
+                if key == "key.keyboard.escape" {
+                    m::request_consume_escape();
+                }
                 let saved_look = m::get_frozen_look();
                 m::close_world_map();
                 if let Some((saved_yaw, saved_pitch)) = saved_look {
@@ -36,6 +39,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 }
                 game.mouse = Default::default();
                 game.screen = crate::game::Screen::Playing;
+                game.pause_menu = false;
                 game.capture(true);
                 game.keys.clear();
             } else if key == "key.keyboard.b" || key == waypoint_key {
@@ -114,6 +118,9 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
     if m::is_gui_open() {
         if pressed {
             if key == "key.keyboard.escape" || key == waypoints_gui_key {
+                if key == "key.keyboard.escape" {
+                    m::request_consume_escape();
+                }
                 let saved_look = m::get_frozen_look();
                 m::close_gui();
                 if let Some((saved_yaw, saved_pitch)) = saved_look {
@@ -122,6 +129,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 }
                 game.mouse = Default::default();
                 game.screen = crate::game::Screen::Playing;
+                game.pause_menu = false;
                 game.capture(true);
                 game.keys.clear();
             } else if key == "key.mouse.left" {
