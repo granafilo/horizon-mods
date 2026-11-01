@@ -18,8 +18,6 @@ fn minimap_hud(
         batch.blends.clear();
         batch.patches.clear();
 
-        game.captured = true;
-        game.creative = true;
         game.attack_clicks = 0;
         game.keys.clear();
         if let Some((y, p)) = m::get_frozen_look() {
@@ -29,6 +27,22 @@ fn minimap_hud(
 
         if m::is_world_map_open() {
             m::update_world_map_drag(game.cursor);
+            if let Some(quads) = m::take_world_map_quadrants_to_upload(&player.dimension) {
+                let (w, h) = (game.gui.atlas.width as f32, game.gui.atlas.height as f32);
+                let slots = [250usize, 251, 252, 253];
+                for (idx, &slot) in slots.iter().enumerate() {
+                    let name = format!("horizon/map{slot}");
+                    if let Some(rect) = game.gui.atlas.sprites.get(&name).copied() {
+                        game.map_patches.push(horizon_client::font::Patch {
+                            x: (rect.u0 * w).round() as u32,
+                            y: (rect.v0 * h).round() as u32,
+                            width: 128,
+                            height: 128,
+                            rgba: quads[idx].clone(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -127,6 +141,25 @@ fn minimap_hud(
             m::HudDrawOp::MapTexture { rect } => {
                 if let Some(sprite) = game.gui.atlas.sprites.get(horizon_client::hud::MINIMAP_SPRITE).copied() {
                     batch.rect_uv(rect[0], rect[1], rect[2], rect[3], sprite, u32::MAX);
+                }
+            }
+            m::HudDrawOp::MapTextureGrid { rect, slots } => {
+                let [x, y, w, h] = rect;
+                let hw = w / 2.0;
+                let hh = h / 2.0;
+                let quads = [
+                    ([x, y, hw, hh], slots[0]),
+                    ([x + hw, y, hw, hh], slots[1]),
+                    ([x, y + hh, hw, hh], slots[2]),
+                    ([x + hw, y + hh, hw, hh], slots[3]),
+                ];
+                for ([qx, qy, qw, qh], slot) in quads {
+                    let name = format!("horizon/map{slot}");
+                    if let Some(sprite) = game.gui.atlas.sprites.get(&name).copied() {
+                        batch.rect_uv(qx, qy, qw, qh, sprite, u32::MAX);
+                    } else if let Some(sprite) = game.gui.atlas.sprites.get(horizon_client::hud::MINIMAP_SPRITE).copied() {
+                        batch.rect_uv(qx, qy, qw, qh, sprite, u32::MAX);
+                    }
                 }
             }
             m::HudDrawOp::PlayerMarker { center, yaw } => {

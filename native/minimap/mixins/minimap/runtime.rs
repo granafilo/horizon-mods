@@ -355,6 +355,147 @@ pub struct WorldMapState {
     pub message: Option<(String, u32)>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExploredChunk {
+    pub color: [u8; 256],
+    pub height: [i16; 256],
+    pub depth: [u8; 256],
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExploredWorld {
+    pub chunks: std::collections::HashMap<(String, i32, i32), ExploredChunk>,
+    pub dirty: bool,
+    pub revision: u64,
+}
+
+impl ExploredWorld {
+    pub fn get_block(&self, dim: &str, x: i32, z: i32) -> Option<(u8, i16, u8)> {
+        let cx = x >> 4;
+        let cz = z >> 4;
+        let chunk = self.chunks.get(&(dim.to_string(), cx, cz))?;
+        let lx = (x & 15) as usize;
+        let lz = (z & 15) as usize;
+        let idx = lz * 16 + lx;
+        Some((chunk.color[idx], chunk.height[idx], chunk.depth[idx]))
+    }
+
+    pub fn record_chunk(
+        &mut self,
+        dim: &str,
+        cx: i32,
+        cz: i32,
+        color: [u8; 256],
+        height: [i16; 256],
+        depth: [u8; 256],
+    ) {
+        let key = (dim.to_string(), cx, cz);
+        let updated = match self.chunks.get(&key) {
+            Some(existing) => existing.color != color || existing.height != height,
+            None => true,
+        };
+        if updated {
+            self.chunks.insert(key, ExploredChunk { color, height, depth });
+            self.dirty = true;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    pub fn save_to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(12 + self.chunks.len() * 1050);
+        buf.extend_from_slice(b"HMAP");
+        buf.extend_from_slice(&1u32.to_le_bytes()); // Version 1
+        buf.extend_from_slice(&(self.chunks.len() as u32).to_le_bytes());
+
+        for ((dim, cx, cz), chunk) in &self.chunks {
+            let dim_bytes = dim.as_bytes();
+            buf.extend_from_slice(&(dim_bytes.len() as u16).to_le_bytes());
+            buf.extend_from_slice(dim_bytes);
+            buf.extend_from_slice(&cx.to_le_bytes());
+            buf.extend_from_slice(&cz.to_le_bytes());
+            buf.extend_from_slice(&chunk.color);
+            for h in &chunk.height {
+                buf.extend_from_slice(&h.to_le_bytes());
+            }
+            buf.extend_from_slice(&chunk.depth);
+        }
+        buf
+    }
+
+    pub fn load_from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 12 || &data[0..4] != b"HMAP" {
+            return None;
+        }
+        let ver = u32::from_le_bytes(data[4..8].try_into().ok()?);
+        if ver != 1 {
+            return None;
+        }
+        let count = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+        let mut offset = 12;
+        let mut chunks = std::collections::HashMap::with_capacity(count);
+
+        for _ in 0..count {
+            if offset + 2 > data.len() { break; }
+            let dim_len = u16::from_le_bytes(data[offset..offset+2].try_into().ok()?) as usize;
+            offset += 2;
+            if offset + dim_len > data.len() { break; }
+            let dim = std::str::from_utf8(&data[offset..offset+dim_len]).ok()?.to_string();
+            offset += dim_len;
+
+            if offset + 8 + 256 + 512 + 256 > data.len() { break; }
+            let cx = i32::from_le_bytes(data[offset..offset+4].try_into().ok()?);
+            let cz = i32::from_le_bytes(data[offset+4..offset+8].try_into().ok()?);
+            offset += 8;
+
+            let mut color = [0u8; 256];
+            color.copy_from_slice(&data[offset..offset+256]);
+            offset += 256;
+
+            let mut height = [0i16; 256];
+            for i in 0..256 {
+                height[i] = i16::from_le_bytes(data[offset+i*2..offset+i*2+2].try_into().ok()?);
+            }
+            offset += 512;
+
+            let mut depth = [0u8; 256];
+            depth.copy_from_slice(&data[offset..offset+256]);
+            offset += 256;
+
+            chunks.insert((dim, cx, cz), ExploredChunk { color, height, depth });
+        }
+
+        Some(Self {
+            chunks,
+            dirty: false,
+            revision: 1,
+        })
+    }
+}
+
+pub fn save_explored_cache(explored: &ExploredWorld) {
+    if !explored.dirty {
+        return;
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/granafilo".into());
+    let path = std::path::PathBuf::from(home).join(".local/share/horizon-launcher/minimap/explored_chunks.bin");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let bytes = explored.save_to_bytes();
+    let _ = std::fs::write(path, bytes);
+}
+
+pub fn load_explored_cache() -> ExploredWorld {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/granafilo".into());
+    let path = std::path::PathBuf::from(home).join(".local/share/horizon-launcher/minimap/explored_chunks.bin");
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Some(world) = ExploredWorld::load_from_bytes(&bytes) {
+            return world;
+        }
+    }
+    ExploredWorld::default()
+}
+
 impl Default for WorldMapState {
     fn default() -> Self {
         Self {
@@ -399,6 +540,10 @@ pub struct RuntimeState {
     pub waypoints_dirty: bool,
     pub gui: WaypointsGuiState,
     pub world_map: WorldMapState,
+    pub explored_world: ExploredWorld,
+    pub explored_loaded: bool,
+    pub map_texture_cache: Option<(i32, i32, usize, u64)>,
+    pub map_quadrants: Option<[Vec<u8>; 4]>,
 }
 
 thread_local! {
@@ -593,31 +738,77 @@ pub fn close_gui() {
 }
 
 pub fn was_creative() -> bool {
-    STATE.with_borrow(|s| s.gui.was_creative || s.world_map.was_creative)
+    false
 }
 
 pub fn get_frozen_look() -> Option<(f32, f32)> {
     STATE.with_borrow(|s| {
-        s.gui
-            .frozen_look
-            .or(s.gui.last_frozen_look)
-            .or(s.world_map.frozen_look)
-            .or(s.world_map.last_frozen_look)
+        if s.world_map.is_open {
+            s.world_map.frozen_look.or(s.world_map.last_frozen_look)
+        } else if s.gui.is_open {
+            s.gui.frozen_look.or(s.gui.last_frozen_look)
+        } else {
+            None
+        }
     })
 }
 
 pub fn take_suppress_mouse_look() -> Option<(f32, f32)> {
     STATE.with_borrow_mut(|s| {
-        if s.gui.suppress_mouse_frames > 0 {
-            s.gui.suppress_mouse_frames -= 1;
-            s.gui.last_frozen_look
-        } else if s.world_map.suppress_mouse_frames > 0 {
+        if s.world_map.suppress_mouse_frames > 0 {
             s.world_map.suppress_mouse_frames -= 1;
-            s.world_map.last_frozen_look
+            let look = s.world_map.last_frozen_look;
+            if s.world_map.suppress_mouse_frames == 0 {
+                s.world_map.last_frozen_look = None;
+            }
+            look
+        } else if s.gui.suppress_mouse_frames > 0 {
+            s.gui.suppress_mouse_frames -= 1;
+            let look = s.gui.last_frozen_look;
+            if s.gui.suppress_mouse_frames == 0 {
+                s.gui.last_frozen_look = None;
+            }
+            look
         } else {
             None
         }
     })
+}
+
+pub fn has_explored_chunk(dim: &str, cx: i32, cz: i32) -> bool {
+    STATE.with_borrow_mut(|s| {
+        if !s.explored_loaded {
+            s.explored_loaded = true;
+            s.explored_world = load_explored_cache();
+        }
+        s.explored_world.chunks.contains_key(&(dim.to_string(), cx, cz))
+    })
+}
+
+pub fn record_chunk_columns(
+    dim: &str,
+    cx: i32,
+    cz: i32,
+    color: [u8; 256],
+    height: [i16; 256],
+    depth: [u8; 256],
+) {
+    STATE.with_borrow_mut(|s| {
+        if !s.explored_loaded {
+            s.explored_loaded = true;
+            s.explored_world = load_explored_cache();
+        }
+        s.explored_world.record_chunk(dim, cx, cz, color, height, depth);
+    });
+}
+
+pub fn save_explored_world_if_dirty() {
+    STATE.with_borrow_mut(|s| {
+        if s.explored_world.dirty {
+            save_explored_cache(&s.explored_world);
+            s.explored_world.dirty = false;
+        }
+    });
 }
 
 fn do_close_world_map(wm: &mut WorldMapState) {
@@ -652,7 +843,7 @@ pub fn close_world_map() {
 
 pub fn toggle_world_map(
     player: Option<PlayerSnapshot>,
-    was_creative: bool,
+    _was_creative: bool,
     yaw: f32,
     pitch: f32,
 ) -> bool {
@@ -663,8 +854,12 @@ pub fn toggle_world_map(
             if s.gui.is_open {
                 do_close_gui(&mut s.gui);
             }
+            if !s.explored_loaded {
+                s.explored_loaded = true;
+                s.explored_world = load_explored_cache();
+            }
             s.world_map.is_open = true;
-            s.world_map.was_creative = was_creative;
+            s.world_map.was_creative = false;
             s.world_map.frozen_look = Some((yaw, pitch));
             s.world_map.last_frozen_look = Some((yaw, pitch));
             s.world_map.suppress_mouse_frames = 0;
@@ -823,7 +1018,7 @@ pub fn on_world_map_click(
     action
 }
 
-pub fn on_world_map_right_click(
+pub fn create_world_map_waypoint(
     cursor_x: f32,
     cursor_y: f32,
     player: Option<PlayerSnapshot>,
@@ -842,22 +1037,23 @@ pub fn on_world_map_right_click(
         let map_y = (30.0 + (sh - 62.0 - map_size) / 2.0).round();
         let map_rect = [map_x, map_y, map_size, map_size];
 
-        if !is_inside(cursor, map_rect) {
-            return;
-        }
+        let (world_x, world_z, world_y, dimension) = if is_inside(cursor, map_rect) {
+            let map_cx = map_x + map_size / 2.0;
+            let map_cy = map_y + map_size / 2.0;
+            let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+            let scale = map_size / 128.0;
 
-        let map_cx = map_x + map_size / 2.0;
-        let map_cy = map_y + map_size / 2.0;
-        let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
-        let scale = map_size / 128.0;
-
-        let norm_x = (cursor.0 - map_cx) / scale;
-        let norm_z = (cursor.1 - map_cy) / scale;
-        let world_x = (s.world_map.pan_x + f64::from(norm_x * bpp)).round();
-        let world_z = (s.world_map.pan_z + f64::from(norm_z * bpp)).round();
-        let (world_y, dimension) = match player {
-            Some(p) => (p.y, p.dimension),
-            None => (64.0, "minecraft:overworld".to_string()),
+            let norm_x = (cursor.0 - map_cx) / scale;
+            let norm_z = (cursor.1 - map_cy) / scale;
+            let wx = (s.world_map.pan_x + f64::from(norm_x * bpp)).round();
+            let wz = (s.world_map.pan_z + f64::from(norm_z * bpp)).round();
+            let dim = player.as_ref().map(|p| p.dimension.clone()).unwrap_or_else(|| "minecraft:overworld".into());
+            let wy = s.explored_world.get_block(&dim, wx as i32, wz as i32).map(|(_, h, _)| h as f64).unwrap_or_else(|| player.as_ref().map(|p| p.y).unwrap_or(64.0));
+            (wx, wz, wy, dim)
+        } else if let Some(ref p) = player {
+            (p.x.round(), p.z.round(), p.y.round(), p.dimension.clone())
+        } else {
+            (0.0, 0.0, 64.0, "minecraft:overworld".into())
         };
 
         let new_idx = s.waypoints.len() + 1;
@@ -873,13 +1069,21 @@ pub fn on_world_map_right_click(
         s.waypoints.push(wp);
         s.waypoints_dirty = true;
         s.world_map.message = Some((
-            format!("Created Waypoint #{} at {}, {}", new_idx, world_x as i32, world_z as i32),
+            format!("Created Waypoint #{} at [{}, {}, {}]", new_idx, world_x as i32, world_y as i32, world_z as i32),
             60,
         ));
         created = true;
     });
 
     created
+}
+
+pub fn on_world_map_right_click(
+    _cursor_x: f32,
+    _cursor_y: f32,
+    _player: Option<PlayerSnapshot>,
+) -> bool {
+    false
 }
 
 pub fn on_world_map_key(
@@ -954,7 +1158,7 @@ pub fn on_world_map_key(
 
 pub fn toggle_gui(
     player: Option<PlayerSnapshot>,
-    was_creative: bool,
+    _was_creative: bool,
     yaw: f32,
     pitch: f32,
 ) -> bool {
@@ -964,7 +1168,7 @@ pub fn toggle_gui(
             do_close_gui(&mut s.gui);
         } else {
             s.gui.is_open = true;
-            s.gui.was_creative = was_creative;
+            s.gui.was_creative = false;
             s.gui.frozen_look = Some((yaw, pitch));
             s.gui.last_frozen_look = Some((yaw, pitch));
             s.gui.suppress_mouse_frames = 0;
@@ -1859,6 +2063,130 @@ pub fn minimap_rect(corner_idx: usize, size: f32, screen_width: f32, screen_heig
     }
 }
 
+/// Vanilla Minecraft MapColor palette (MapColor.col by id).
+pub const MAP_COLORS: [u32; 62] = [
+    0, 8368696, 16247203, 13092807, 16711680, 10526975, 10987431, 31744, 16777215, 10791096,
+    9923917, 7368816, 4210943, 9402184, 16776437, 14188339, 11685080, 6724056, 15066419, 8375321,
+    15892389, 5000268, 10066329, 5013401, 8339378, 3361970, 6704179, 6717235, 10040115, 1644825,
+    16445005, 6085589, 4882687, 55610, 8476209, 7340544, 13742497, 10441252, 9787244, 7367818,
+    12223780, 6780213, 10505550, 3746083, 8874850, 5725276, 8014168, 4996700, 4993571, 5001770,
+    9321518, 2430480, 12398641, 9715553, 6035741, 1474182, 3837580, 5647422, 1356933, 6579300,
+    14200723, 8365974,
+];
+
+pub fn packed_rgba(id: u8, brightness: u8) -> [u8; 4] {
+    let id = usize::from(id);
+    if id == 0 || id >= MAP_COLORS.len() {
+        return [0, 0, 0, 0];
+    }
+    let modifier = [180u32, 220, 255, 135][usize::from(brightness & 3)];
+    let col = MAP_COLORS[id];
+    let ch = |s: u32| ((col >> s & 255) * modifier / 255) as u8;
+    [ch(16), ch(8), ch(0), 255]
+}
+
+pub fn block_brightness(color: u8, height: i16, north: Option<i16>, depth: u8, parity: i32) -> u8 {
+    let parity = f64::from(parity & 1);
+    if color == 12 { // Water
+        let diff = f64::from(depth) * 0.1 + parity * 0.2;
+        return if diff < 0.5 { 2 } else if diff > 0.9 { 0 } else { 1 };
+    }
+    let north = north.unwrap_or(height);
+    let diff = f64::from(height - north) * 4.0 / 5.0 + (parity - 0.5) * 0.4;
+    if diff > 0.6 {
+        2
+    } else if diff < -0.6 {
+        0
+    } else {
+        1
+    }
+}
+
+pub fn compose_world_map_quadrants(
+    dim: &str,
+    pan_x: f64,
+    pan_z: f64,
+    bpp: f32,
+    explored: &ExploredWorld,
+) -> [Vec<u8>; 4] {
+    let mut quad0 = vec![0u8; 128 * 128 * 4];
+    let mut quad1 = vec![0u8; 128 * 128 * 4];
+    let mut quad2 = vec![0u8; 128 * 128 * 4];
+    let mut quad3 = vec![0u8; 128 * 128 * 4];
+
+    let half = 128.0;
+    let bpp_f64 = f64::from(bpp);
+
+    for j in 0..256 {
+        for i in 0..256 {
+            let u = (i as f64 + 0.5 - half) * bpp_f64;
+            let v = (j as f64 + 0.5 - half) * bpp_f64;
+            let wx = (pan_x + u).floor() as i32;
+            let wz = (pan_z + v).floor() as i32;
+
+            let rgba = match explored.get_block(dim, wx, wz) {
+                Some((color, height, depth)) if color & 0x7F != 0 => {
+                    let north = explored.get_block(dim, wx, wz - 1).map(|c| c.1);
+                    let b = block_brightness(color & 0x7F, height, north, depth, wx + wz);
+                    packed_rgba(color & 0x7F, b)
+                }
+                _ => [16, 16, 20, 255], // Fog of War: scuro non esplorato
+            };
+
+            let (target, qi, qj) = if j < 128 {
+                if i < 128 {
+                    (&mut quad0, i, j)
+                } else {
+                    (&mut quad1, i - 128, j)
+                }
+            } else {
+                if i < 128 {
+                    (&mut quad2, i, j - 128)
+                } else {
+                    (&mut quad3, i - 128, j - 128)
+                }
+            };
+
+            let o = (qj * 128 + qi) * 4;
+            target[o..o + 4].copy_from_slice(&rgba);
+        }
+    }
+
+    [quad0, quad1, quad2, quad3]
+}
+
+pub fn take_world_map_quadrants_to_upload(dimension: &str) -> Option<[Vec<u8>; 4]> {
+    STATE.with_borrow_mut(|s| {
+        if !s.world_map.is_open {
+            return None;
+        }
+
+        let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
+        let current_key = (
+            s.world_map.pan_x.round() as i32,
+            s.world_map.pan_z.round() as i32,
+            s.world_map.zoom_index,
+            s.explored_world.revision,
+        );
+
+        let dirty = s.map_texture_cache.map_or(true, |k| k != current_key);
+        if dirty {
+            s.map_texture_cache = Some(current_key);
+            let quads = compose_world_map_quadrants(
+                dimension,
+                s.world_map.pan_x,
+                s.world_map.pan_z,
+                bpp,
+                &s.explored_world,
+            );
+            s.map_quadrants = Some(quads.clone());
+            Some(quads)
+        } else {
+            None
+        }
+    })
+}
+
 /// Operations to draw on HUD.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HudDrawOp {
@@ -1870,6 +2198,7 @@ pub enum HudDrawOp {
     Button { rect: [f32; 4], label: String, active: bool, hover: bool },
     CenteredText { text: String, y: f32, color: u32 },
     MapTexture { rect: [f32; 4] },
+    MapTextureGrid { rect: [f32; 4], slots: [usize; 4] },
     PlayerMarker { center: [f32; 2], yaw: f32 },
 }
 
@@ -1958,8 +2287,11 @@ pub fn draw_world_map(
             argb: 0xFF2A_2A2A,
         });
 
-        // 4. Map Texture
-        ops.push(HudDrawOp::MapTexture { rect: map_rect });
+        // 4. Map Texture Grid (2x2 slots 256x256 HD)
+        ops.push(HudDrawOp::MapTextureGrid {
+            rect: map_rect,
+            slots: [250, 251, 252, 253],
+        });
 
         // 5. Center Crosshair
         ops.push(HudDrawOp::Fill {
@@ -2091,12 +2423,20 @@ pub fn draw_world_map(
             hover: is_inside(cursor, btn_center),
         });
 
+        // Controls info helper text
+        ops.push(HudDrawOp::Text {
+            text: "[B] Add Waypoint".to_string(),
+            at: [map_x + 232.0, btn_y + 6.0],
+            rgb: 0x00AA_FFAA,
+            shadow: true,
+        });
+
         // Notification message if active
         if let Some((ref msg, _)) = s.world_map.message {
             ops.push(HudDrawOp::Text {
                 text: msg.clone(),
-                at: [map_x + 230.0, btn_y + 6.0],
-                rgb: 0x0055_FF55,
+                at: [map_x + 330.0, btn_y + 6.0],
+                rgb: 0x00FF_DD55,
                 shadow: true,
             });
         }
@@ -2744,8 +3084,12 @@ mod tests {
             assert!(s.world_map.pan_z < -1200.0);
         });
 
-        // 6. Right-click to create waypoint
-        let created = on_world_map_right_click(400.0, 300.0, Some(snapshot.clone()));
+        // 6. Right-click does NOT create waypoint anymore (mouse creation disabled)
+        let right_clicked = on_world_map_right_click(400.0, 300.0, Some(snapshot.clone()));
+        assert!(!right_clicked);
+
+        // 6b. Dedicated waypoint key creates waypoint
+        let created = create_world_map_waypoint(400.0, 300.0, Some(snapshot.clone()));
         assert!(created);
         STATE.with_borrow(|s| {
             assert!(!s.waypoints.is_empty());
@@ -2754,7 +3098,7 @@ mod tests {
         // 7. Draw HUD while World Map open produces World Map ops
         let settings = Settings::read(|_| None);
         let ops = draw_hud(800.0, 600.0, (400.0, 300.0), &snapshot, &settings, |_| 10.0);
-        assert!(ops.iter().any(|op| matches!(op, HudDrawOp::MapTexture { .. })));
+        assert!(ops.iter().any(|op| matches!(op, HudDrawOp::MapTextureGrid { .. })));
         assert!(ops.iter().any(|op| matches!(op, HudDrawOp::PlayerMarker { .. })));
 
         // 8. Close with key
@@ -2762,5 +3106,36 @@ mod tests {
         assert_eq!(act, WorldMapKeyAction::Close);
         assert!(!is_world_map_open());
         assert_eq!(take_suppress_mouse_look(), Some((90.0, 0.0)));
+    }
+
+    #[test]
+    fn test_explored_world_cache_and_fog_of_war() {
+        let mut world = ExploredWorld::default();
+        let dim = "minecraft:overworld";
+
+        // Unexplored chunk block
+        assert_eq!(world.get_block(dim, 100, 200), None);
+
+        // Record a chunk
+        let mut color = [0u8; 256];
+        let mut height = [64i16; 256];
+        let depth = [0u8; 256];
+        color[0] = 1; // Grass
+        height[0] = 70;
+        world.record_chunk(dim, 0, 0, color, height, depth);
+
+        assert_eq!(world.get_block(dim, 0, 0), Some((1, 70, 0)));
+        assert_eq!(world.get_block(dim, 16, 0), None); // Neighbor chunk unexplored
+
+        // Serialization & Deserialization
+        let bytes = world.save_to_bytes();
+        let loaded = ExploredWorld::load_from_bytes(&bytes).expect("Failed to load ExploredWorld");
+        assert_eq!(loaded.get_block(dim, 0, 0), Some((1, 70, 0)));
+        assert_eq!(loaded.get_block(dim, 16, 0), None);
+
+        // Quadrants composition includes block and fog of war
+        let quads = compose_world_map_quadrants(dim, 0.0, 0.0, 1.0, &loaded);
+        assert_eq!(quads.len(), 4);
+        assert_eq!(quads[0].len(), 128 * 128 * 4);
     }
 }

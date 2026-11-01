@@ -29,9 +29,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
         if pressed {
             if key == "key.keyboard.escape" || key == world_map_key {
                 let saved_look = m::get_frozen_look();
-                let was_c = m::was_creative();
                 m::close_world_map();
-                game.creative = was_c;
                 if let Some((saved_yaw, saved_pitch)) = saved_look {
                     game.yaw = saved_yaw;
                     game.pitch = saved_pitch;
@@ -45,15 +43,22 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                     game.capture(true);
                 }
                 game.keys.clear();
+            } else if key == "key.keyboard.b" || key == waypoint_key {
+                let (cx, cy) = game.cursor;
+                let created = m::create_world_map_waypoint(cx, cy, snapshot.clone());
+                if created && m::take_waypoints_dirty() {
+                    let content = m::save_waypoints_content();
+                    game.native_set_setting(m::ID, m::KEY_WAYPOINTS, &content);
+                }
+                game.attack_clicks = 0;
+                game.keys.clear();
             } else if key == "key.mouse.left" {
                 let (cx, cy) = game.cursor;
                 let action = m::on_world_map_click(cx, cy, snapshot.clone());
                 match action {
                     m::WorldMapClickAction::Close => {
                         let saved_look = m::get_frozen_look();
-                        let was_c = m::was_creative();
                         m::close_world_map();
-                        game.creative = was_c;
                         if let Some((saved_yaw, saved_pitch)) = saved_look {
                             game.yaw = saved_yaw;
                             game.pitch = saved_pitch;
@@ -64,7 +69,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                         game.keys.clear();
                     }
                     m::WorldMapClickAction::OpenWaypointsGui => {
-                        m::toggle_gui(snapshot.clone(), game.creative, game.yaw, game.pitch);
+                        m::toggle_gui(snapshot.clone(), false, game.yaw, game.pitch);
                         game.attack_clicks = 0;
                         game.keys.clear();
                     }
@@ -74,12 +79,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                     }
                 }
             } else if key == "key.mouse.right" {
-                let (cx, cy) = game.cursor;
-                let created = m::on_world_map_right_click(cx, cy, snapshot.clone());
-                if created && m::take_waypoints_dirty() {
-                    let content = m::save_waypoints_content();
-                    game.native_set_setting(m::ID, m::KEY_WAYPOINTS, &content);
-                }
+                // Right-click waypoint creation is disabled as requested by user!
                 game.attack_clicks = 0;
                 game.keys.clear();
             } else {
@@ -87,9 +87,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 match action {
                     m::WorldMapKeyAction::Close => {
                         let saved_look = m::get_frozen_look();
-                        let was_c = m::was_creative();
                         m::close_world_map();
-                        game.creative = was_c;
                         if let Some((saved_yaw, saved_pitch)) = saved_look {
                             game.yaw = saved_yaw;
                             game.pitch = saved_pitch;
@@ -100,7 +98,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                         game.keys.clear();
                     }
                     m::WorldMapKeyAction::OpenWaypointsGui => {
-                        m::toggle_gui(snapshot.clone(), game.creative, game.yaw, game.pitch);
+                        m::toggle_gui(snapshot.clone(), false, game.yaw, game.pitch);
                         game.attack_clicks = 0;
                         game.keys.clear();
                     }
@@ -117,18 +115,13 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
         if pressed {
             if key == "key.keyboard.escape" || key == waypoints_gui_key {
                 let saved_look = m::get_frozen_look();
-                let was_c = m::was_creative();
                 m::close_gui();
-                game.creative = was_c;
                 if let Some((saved_yaw, saved_pitch)) = saved_look {
                     game.yaw = saved_yaw;
                     game.pitch = saved_pitch;
                 }
                 game.mouse = Default::default();
                 if key == "key.keyboard.escape" {
-                    // Set to Paused so Horizon's mapped_key(Escape) will execute the
-                    // pause-closing branch which transitions cleanly back to
-                    // Screen::Playing with capture(true), without opening the pause menu!
                     game.screen = crate::game::Screen::Paused;
                     game.pause_menu = false;
                 } else {
@@ -141,8 +134,6 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 let saved_look = m::get_frozen_look();
                 let closed = m::on_gui_click(cx, cy, snapshot.clone());
                 if closed {
-                    let was_c = m::was_creative();
-                    game.creative = was_c;
                     if let Some((saved_yaw, saved_pitch)) = saved_look {
                         game.yaw = saved_yaw;
                         game.pitch = saved_pitch;
@@ -171,9 +162,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
             let was_open = m::is_world_map_open();
             if was_open {
                 let saved_look = m::get_frozen_look();
-                let was_c = m::was_creative();
                 m::close_world_map();
-                game.creative = was_c;
                 if let Some((saved_yaw, saved_pitch)) = saved_look {
                     game.yaw = saved_yaw;
                     game.pitch = saved_pitch;
@@ -183,13 +172,9 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 game.capture(true);
                 game.keys.clear();
             } else {
-                let opened = m::toggle_world_map(snapshot.clone(), game.creative, game.yaw, game.pitch);
+                let opened = m::toggle_world_map(snapshot.clone(), false, game.yaw, game.pitch);
                 if opened {
-                    // Release OS cursor grab and show mouse cursor
                     game.capture(false);
-                    // Mark captured = true so game.rs forwards mouse clicks to extras_mouse
-                    game.captured = true;
-                    game.creative = true;
                     game.keys.clear();
                 }
             }
@@ -202,9 +187,7 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
             let was_open = m::is_gui_open();
             if was_open {
                 let saved_look = m::get_frozen_look();
-                let was_c = m::was_creative();
                 m::close_gui();
-                game.creative = was_c;
                 if let Some((saved_yaw, saved_pitch)) = saved_look {
                     game.yaw = saved_yaw;
                     game.pitch = saved_pitch;
@@ -214,13 +197,9 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 game.capture(true);
                 game.keys.clear();
             } else {
-                let opened = m::toggle_gui(snapshot.clone(), game.creative, game.yaw, game.pitch);
+                let opened = m::toggle_gui(snapshot.clone(), false, game.yaw, game.pitch);
                 if opened {
-                    // Release OS cursor grab and show mouse cursor
                     game.capture(false);
-                    // Mark captured = true so game.rs forwards mouse clicks to extras_mouse
-                    game.captured = true;
-                    game.creative = true;
                     game.keys.clear();
                 }
             }
