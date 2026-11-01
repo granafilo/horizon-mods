@@ -35,13 +35,8 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                     game.pitch = saved_pitch;
                 }
                 game.mouse = Default::default();
-                if key == "key.keyboard.escape" {
-                    game.screen = crate::game::Screen::Paused;
-                    game.pause_menu = false;
-                } else {
-                    game.screen = crate::game::Screen::Playing;
-                    game.capture(true);
-                }
+                game.screen = crate::game::Screen::Playing;
+                game.capture(true);
                 game.keys.clear();
             } else if key == "key.keyboard.b" || key == waypoint_key {
                 let (cx, cy) = game.cursor;
@@ -99,6 +94,11 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                     }
                     m::WorldMapKeyAction::OpenWaypointsGui => {
                         m::toggle_gui(snapshot.clone(), false, game.yaw, game.pitch);
+                        game.captured = true;
+                        if let Some(w) = &game.window {
+                            w.set_cursor_visible(true);
+                            let _ = w.set_cursor_grab(winit::window::CursorGrabMode::None);
+                        }
                         game.attack_clicks = 0;
                         game.keys.clear();
                     }
@@ -121,13 +121,8 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                     game.pitch = saved_pitch;
                 }
                 game.mouse = Default::default();
-                if key == "key.keyboard.escape" {
-                    game.screen = crate::game::Screen::Paused;
-                    game.pause_menu = false;
-                } else {
-                    game.screen = crate::game::Screen::Playing;
-                    game.capture(true);
-                }
+                game.screen = crate::game::Screen::Playing;
+                game.capture(true);
                 game.keys.clear();
             } else if key == "key.mouse.left" {
                 let (cx, cy) = game.cursor;
@@ -175,6 +170,11 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 let opened = m::toggle_world_map(snapshot.clone(), false, game.yaw, game.pitch);
                 if opened {
                     game.capture(false);
+                    game.captured = true;
+                    if let Some(w) = &game.window {
+                        w.set_cursor_visible(true);
+                        let _ = w.set_cursor_grab(winit::window::CursorGrabMode::None);
+                    }
                     game.keys.clear();
                 }
             }
@@ -200,6 +200,11 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
                 let opened = m::toggle_gui(snapshot.clone(), false, game.yaw, game.pitch);
                 if opened {
                     game.capture(false);
+                    game.captured = true;
+                    if let Some(w) = &game.window {
+                        w.set_cursor_visible(true);
+                        let _ = w.set_cursor_grab(winit::window::CursorGrabMode::None);
+                    }
                     game.keys.clear();
                 }
             }

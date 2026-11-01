@@ -25,6 +25,12 @@ fn minimap_hud(
             game.pitch = p;
         }
 
+        game.captured = true;
+        if let Some(w) = &game.window {
+            w.set_cursor_visible(true);
+            let _ = w.set_cursor_grab(winit::window::CursorGrabMode::None);
+        }
+
         if m::is_world_map_open() {
             m::update_world_map_drag(game.cursor);
             if let Some(quads) = m::take_world_map_quadrants_to_upload(&player.dimension) {

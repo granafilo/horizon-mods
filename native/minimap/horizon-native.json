@@ -1,7 +1,6 @@
 {
   "game": "26.3",
-  "hooks": 1,
-  "horizon": "6f8c7a0e5d531d3834c4d0be4659a1db8e7e5c2a",
+  "horizon": "142388e1c136e622652ec7505af15d8ad195e041",
   "id": "minimap",
   "mixins": "0d6b103c70633d8fd9443d8d0acd3aadaacedb06",
   "schema": 1,

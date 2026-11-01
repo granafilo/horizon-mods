@@ -1,4 +1,4 @@
-// Suppress all game key handling (movement, hotbar, actions) while the Waypoint GUI or World Map is open.
+// Suppress all game key handling (movement, hotbar, actions, escape) while the Waypoint GUI or World Map is open.
 fn minimap_mapped_key(
     game: &mut crate::game::Game<'_>,
     key: winit::keyboard::KeyCode,
@@ -7,7 +7,7 @@ fn minimap_mapped_key(
 ) -> core::ops::ControlFlow<Result<()>> {
     let _ = (game, pressed, repeat);
     use crate::game::official_minimap as m;
-    if (m::is_gui_open() || m::is_world_map_open()) && key != winit::keyboard::KeyCode::Escape {
+    if m::is_gui_open() || m::is_world_map_open() {
         return core::ops::ControlFlow::Break(Ok(()));
     }
     core::ops::ControlFlow::Continue(())
