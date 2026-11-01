@@ -17,7 +17,7 @@ pub const KEY_WAYPOINTS_GUI: &str = "waypoints_gui";
 pub const DEFAULT_WAYPOINTS_GUI_KEY: &str = "key.keyboard.u";
 pub const KEY_WORLD_MAP: &str = "world_map";
 pub const DEFAULT_WORLD_MAP_KEY: &str = "key.keyboard.m";
-pub const WORLD_MAP_ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+pub const WORLD_MAP_ZOOMS: [f32; 8] = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0, 8.0];
 
 /// Quick ping lifetime in ticks (20 ticks = 1 sec -> 200 ticks = 10 sec).
 pub const PING_LIFETIME_TICKS: u32 = 200;
@@ -32,8 +32,14 @@ pub const CORNERS: [(&str, &str); 4] = [
     ("bottom_right", "Bottom right"),
 ];
 /// Sides in GUI pixels, and blocks per map pixel.
-pub const SIZES: [(u8, &str); 3] = [(64, "Small"), (96, "Medium"), (128, "Large")];
-pub const ZOOMS: [f32; 4] = [0.5, 1.0, 2.0, 4.0];
+pub const SIZES: [(u8, &str); 5] = [
+    (64, "Small"),
+    (96, "Medium"),
+    (128, "Large"),
+    (160, "Extra Large"),
+    (192, "Huge"),
+];
+pub const ZOOMS: [f32; 7] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
 
 /// Waypoint data structure.
 #[derive(Clone, Debug, PartialEq)]
@@ -161,7 +167,7 @@ impl Settings {
             corner: find("corner", &corners, 1),
             size: find("size", &sizes, 1),
             round: get("shape").as_deref() == Some("round"),
-            zoom: find("zoom", &zooms, 1),
+            zoom: find("zoom", &zooms, 2),
             rotate: get("rotate").as_deref() == Some("true"),
             show_hud_pings: get("hud_pings").as_deref() != Some("false"),
             show_minimap_pings: get("minimap_pings").as_deref() != Some("false"),
@@ -172,12 +178,16 @@ impl Settings {
 
     pub fn labels(&self) -> Vec<String> {
         let n = ZOOMS[self.zoom];
-        let blocks = if n < 1.0 {
+        let blocks = if (n - 0.5).abs() < 0.01 {
             "½ block".to_owned()
-        } else if n == 1.0 {
+        } else if (n - 0.75).abs() < 0.01 {
+            "¾ block".to_owned()
+        } else if (n - 1.0).abs() < 0.01 {
             "1 block".to_owned()
+        } else if (n - 1.5).abs() < 0.01 {
+            "1½ blocks".to_owned()
         } else {
-            format!("{n} blocks")
+            format!("{n:.0} blocks")
         };
         vec![
             format!("Corner: {}", CORNERS[self.corner].1),
@@ -502,7 +512,7 @@ impl Default for WorldMapState {
             is_open: false,
             pan_x: 0.0,
             pan_z: 0.0,
-            zoom_index: 1, // Default 1.0 bpp
+            zoom_index: 3, // Default 1.0 bpp (WORLD_MAP_ZOOMS[3] == 1.0)
             dragging: false,
             drag_start_cursor: (0.0, 0.0),
             drag_start_pan: (0.0, 0.0),
@@ -545,6 +555,7 @@ pub struct RuntimeState {
     pub map_texture_cache: Option<(i32, i32, usize, u64)>,
     pub map_quadrants: Option<[Vec<u8>; 4]>,
     pub consume_escape: bool,
+    pub minimap_toast: Option<(String, u32)>,
 }
 
 thread_local! {
@@ -612,6 +623,37 @@ pub fn settings(get: impl Fn(&str) -> Option<String>) -> Settings {
 /// Replaces the settings.
 pub fn set_settings(settings: Settings) {
     STATE.with_borrow_mut(|s| s.settings = Some(settings));
+}
+
+/// Cycles the minimap zoom by `step` (-1 to zoom in, +1 to zoom out).
+/// Updates settings cache, sets a 3-second HUD toast notification, and returns `(new_index, bpp, toast)`.
+pub fn cycle_minimap_zoom(step: i32, get: impl Fn(&str) -> Option<String>) -> Option<(usize, f32, String)> {
+    let mut current = settings(get);
+    let old_idx = current.zoom;
+    let len = ZOOMS.len() as i32;
+    let new_idx = (old_idx as i32 + step).clamp(0, len - 1) as usize;
+    if new_idx == old_idx {
+        return None;
+    }
+    current.zoom = new_idx;
+    set_settings(current);
+    let bpp = ZOOMS[new_idx];
+    let blocks_str = if (bpp - 0.5).abs() < 0.01 {
+        "½ block".to_owned()
+    } else if (bpp - 0.75).abs() < 0.01 {
+        "¾ block".to_owned()
+    } else if (bpp - 1.0).abs() < 0.01 {
+        "1 block".to_owned()
+    } else if (bpp - 1.5).abs() < 0.01 {
+        "1½ blocks".to_owned()
+    } else {
+        format!("{bpp:.0} blocks")
+    };
+    let toast = format!("Minimap Zoom: {blocks_str}/px");
+    STATE.with_borrow_mut(|s| {
+        s.minimap_toast = Some((toast.clone(), 60));
+    });
+    Some((new_idx, bpp, toast))
 }
 
 /// Adds a quick ping.
@@ -1056,12 +1098,10 @@ pub fn create_world_map_waypoint(
             let map_cx = map_x + map_size / 2.0;
             let map_cy = map_y + map_size / 2.0;
             let bpp = WORLD_MAP_ZOOMS[s.world_map.zoom_index];
-            let scale = map_size / 128.0;
+            let pixels_per_block = map_size / (256.0 * bpp);
 
-            let norm_x = (cursor.0 - map_cx) / scale;
-            let norm_z = (cursor.1 - map_cy) / scale;
-            let wx = (s.world_map.pan_x + f64::from(norm_x * bpp)).round();
-            let wz = (s.world_map.pan_z + f64::from(norm_z * bpp)).round();
+            let wx = (s.world_map.pan_x + f64::from((cursor.0 - map_cx) / pixels_per_block)).round();
+            let wz = (s.world_map.pan_z + f64::from((cursor.1 - map_cy) / pixels_per_block)).round();
             let dim = player.as_ref().map(|p| p.dimension.clone()).unwrap_or_else(|| "minecraft:overworld".into());
             let wy = s.explored_world.get_block(&dim, wx as i32, wz as i32).map(|(_, h, _)| h as f64).unwrap_or_else(|| player.as_ref().map(|p| p.y).unwrap_or(64.0));
             (wx, wz, wy, dim)
@@ -1921,6 +1961,17 @@ pub fn tick() {
             }
         }
         s.pings.retain(|p| p.remaining_ticks > 0);
+
+        if let Some((_, ref mut ticks)) = s.minimap_toast {
+            if *ticks > 0 {
+                *ticks -= 1;
+            }
+        }
+        if let Some((_, ticks)) = s.minimap_toast {
+            if ticks == 0 {
+                s.minimap_toast = None;
+            }
+        }
     });
 }
 
@@ -2104,16 +2155,18 @@ pub fn block_brightness(color: u8, height: i16, north: Option<i16>, depth: u8, p
     let parity = f64::from(parity & 1);
     if color == 12 { // Water
         let diff = f64::from(depth) * 0.1 + parity * 0.2;
-        return if diff < 0.5 { 2 } else if diff > 0.9 { 0 } else { 1 };
+        return if diff < 0.4 { 2 } else if diff > 1.2 { 3 } else if diff > 0.8 { 0 } else { 1 };
     }
     let north = north.unwrap_or(height);
     let diff = f64::from(height - north) * 4.0 / 5.0 + (parity - 0.5) * 0.4;
-    if diff > 0.6 {
-        2
-    } else if diff < -0.6 {
-        0
+    if diff > 0.5 {
+        2 // Bright / sunlit slope
+    } else if diff < -1.8 {
+        3 // Darkest / steep drop or cliff shadow
+    } else if diff < -0.5 {
+        0 // Darker / descending slope
     } else {
-        1
+        1 // Normal flat ground
     }
 }
 
@@ -2735,6 +2788,38 @@ pub fn draw_hud(
         });
     }
 
+    // 4. Minimap Toast Notification (e.g. Zoom: 1 block/px)
+    STATE.with_borrow(|s| {
+        if let Some((ref text, _ticks)) = s.minimap_toast {
+            let tw = text_width(text);
+            let box_w = tw + 8.0;
+            let box_h = 12.0;
+            let is_top = settings.corner <= 1;
+            let is_left = settings.corner == 0 || settings.corner == 2;
+            let ox = if is_left {
+                map_x
+            } else {
+                map_x + map_size - box_w
+            };
+            let offset_y = if settings.show_coords { 26.0 } else { 3.0 };
+            let oy = if is_top {
+                map_y + map_size + offset_y
+            } else {
+                map_y - box_h - offset_y
+            };
+            ops.push(HudDrawOp::Fill {
+                rect: [ox, oy, box_w, box_h],
+                argb: 0x9000_0000,
+            });
+            ops.push(HudDrawOp::Text {
+                text: text.clone(),
+                at: [ox + 4.0, oy + 2.0],
+                rgb: 0x00FF_FF55, // Minecraft Yellow/Gold
+                shadow: true,
+            });
+        }
+    });
+
     // Waypoint Manager GUI Modal (rendered on top when open)
     draw_waypoints_gui(screen_width, screen_height, cursor, player, &mut ops);
 
@@ -2773,7 +2858,7 @@ mod tests {
         let s = Settings::read(none);
         assert_eq!(
             (s.corner, s.size, s.round, s.zoom, s.rotate, s.show_hud_pings, s.show_minimap_pings, s.show_coords, s.show_beacons),
-            (1, 1, false, 1, false, true, true, true, true)
+            (1, 1, false, 2, false, true, true, true, true)
         );
 
         let files = [
@@ -3080,19 +3165,33 @@ mod tests {
 
         // 2. Zoom in and out
         world_map_zoom_in();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.75)));
+        world_map_zoom_in();
         assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.5)));
+        world_map_zoom_in();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.25)));
         world_map_zoom_in(); // Clamped at min
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.25)));
+        world_map_zoom_out();
         assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.5)));
         world_map_zoom_out();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 0.75)));
+        world_map_zoom_out();
         assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.0)));
+        world_map_zoom_out();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.5)));
         world_map_zoom_out();
         assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 2.0)));
         world_map_zoom_out();
         assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 4.0)));
+        world_map_zoom_out();
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 8.0)));
         world_map_zoom_out(); // Clamped at max
-        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 4.0)));
+        assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 8.0)));
 
         // Reset to 1.0 bpp
+        world_map_zoom_in();
+        world_map_zoom_in();
         world_map_zoom_in();
         world_map_zoom_in();
         assert_eq!(get_world_map_view(), Some((500.0, -1200.0, 1.0)));
@@ -3187,7 +3286,7 @@ mod tests {
         STATE.with_borrow_mut(|s| {
             s.world_map.screen_width = 800.0;
             s.world_map.screen_height = 600.0;
-            s.world_map.zoom_index = 1; // bpp = 1.0
+            s.world_map.zoom_index = 3; // bpp = 1.0
             s.world_map.pan_x = 500.0;
             s.world_map.pan_z = -1200.0;
         });
@@ -3203,5 +3302,31 @@ mod tests {
             assert_eq!(s.world_map.pan_x, 490.0);
             assert_eq!(s.world_map.pan_z, -1205.0);
         });
+    }
+
+    #[test]
+    fn test_minimap_zoom_cycle_and_toast() {
+        let dummy_get = |_k: &str| None;
+        let s = Settings::read(dummy_get);
+        assert_eq!(s.zoom, 2); // 1.0 bpp
+
+        // Zoom In (-1): should move from 1.0 (index 2) to 0.75 (index 1)
+        let res = cycle_minimap_zoom(-1, dummy_get);
+        assert_eq!(res, Some((1, 0.75, "Minimap Zoom: ¾ block/px".to_string())));
+        STATE.with_borrow(|st| {
+            assert_eq!(st.minimap_toast.as_ref().map(|(t, _)| t.as_str()), Some("Minimap Zoom: ¾ block/px"));
+        });
+
+        // Zoom In again (-1): index 0 (0.5 bpp)
+        let res2 = cycle_minimap_zoom(-1, dummy_get);
+        assert_eq!(res2, Some((0, 0.5, "Minimap Zoom: ½ block/px".to_string())));
+
+        // Zoom In clamped at 0
+        let res_clamped = cycle_minimap_zoom(-1, dummy_get);
+        assert_eq!(res_clamped, None);
+
+        // Zoom Out (+1)
+        let res3 = cycle_minimap_zoom(1, dummy_get);
+        assert_eq!(res3, Some((1, 0.75, "Minimap Zoom: ¾ block/px".to_string())));
     }
 }

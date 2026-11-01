@@ -228,6 +228,21 @@ fn minimap_key(game: &mut crate::game::Game<'_>, key: &str, pressed: bool) {
             let content = m::save_waypoints_content();
             game.native_set_setting(m::ID, m::KEY_WAYPOINTS, &content);
         }
+    } else if playing && pressed {
+        let zoom_in = key == "key.keyboard.right.bracket"
+            || key == "key.keyboard.i"
+            || key == "key.keyboard.page.up"
+            || key == "key.keyboard.equal";
+        let zoom_out = key == "key.keyboard.left.bracket"
+            || key == "key.keyboard.o"
+            || key == "key.keyboard.page.down"
+            || key == "key.keyboard.minus";
+        if zoom_in || zoom_out {
+            let step = if zoom_in { -1 } else { 1 };
+            if let Some((_idx, bpp, _toast)) = m::cycle_minimap_zoom(step, |k| game.native_setting(m::ID, k)) {
+                game.native_set_setting(m::ID, "zoom", &bpp.to_string());
+            }
+        }
     }
 }
 
