@@ -172,7 +172,7 @@ fn minimap_hud_layers(
                 m::HudDrawOp::PlayerMarker { center, yaw } => {
                     let (cx, cy) = (center[0], center[1]);
                     if let Some(r) = game.gui.atlas.sprites.get("map/decorations/player").copied() {
-                        let (s, c) = (yaw + 180.0).to_radians().sin_cos();
+                        let (s, c) = yaw.to_radians().sin_cos();
                         let p = |dx: f32, dy: f32| [cx + dx * c - dy * s, cy + dx * s + dy * c];
                         let h = 5.0;
                         batch.quad(
